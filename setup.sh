@@ -1,13 +1,13 @@
 #!/bin/bash
 
-# Matrix server
-# 版本: 1.0.2
+# Matrix 服务器一键部署脚本
+# 版本: 1.1.0
 # 用法: bash <(curl -fsSL https://raw.githubusercontent.com/niublab/know/main/setup.sh)
 
 set -euo pipefail
 
 # 脚本配置
-VERSION="1.0.2"
+VERSION="1.1.0"
 WORK_DIR="$HOME/matrix-deploy"
 GITHUB_USER="niublab"
 GITHUB_REPO="know"
@@ -51,6 +51,7 @@ show_banner() {
     echo "║  🚀 专为内网环境和ISP端口封锁设计                            ║"
     echo "║  🔒 支持自定义端口和完整证书管理                             ║"
     echo "║  🎯 一键部署，菜单式交互                                     ║"
+    echo "║  👑 支持root用户，简化权限管理                               ║"
     echo "║                                                              ║"
     echo "╚══════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
@@ -105,24 +106,23 @@ check_permissions() {
     log_info "检查用户权限..."
     
     if [[ $EUID -eq 0 ]]; then
-        log_error "请不要以 root 用户运行此脚本"
-        log_info "请切换到普通用户后重新运行:"
-        log_info "  su - your_username"
-        log_info "  bash <(curl -fsSL $BASE_URL/setup.sh)"
-        exit 1
-    fi
-    
-    log_info "当前用户: $(whoami) ✓"
-    
-    # 检查sudo权限
-    if ! sudo -n true 2>/dev/null; then
-        log_warn "需要sudo权限，请输入密码"
-        if ! sudo -v; then
-            log_error "无法获取sudo权限"
-            exit 1
+        log_info "当前用户: root ✓"
+        log_info "Root权限: 可用 ✓"
+        # 如果是root用户，调整工作目录
+        WORK_DIR="/opt/matrix-deploy"
+    else
+        log_info "当前用户: $(whoami)"
+        
+        # 检查sudo权限
+        if ! sudo -n true 2>/dev/null; then
+            log_warn "需要sudo权限，请输入密码"
+            if ! sudo -v; then
+                log_error "无法获取sudo权限"
+                exit 1
+            fi
         fi
+        log_info "Sudo权限: 可用 ✓"
     fi
-    log_info "Sudo权限: 可用 ✓"
 }
 
 # 检查网络连接
@@ -151,7 +151,11 @@ install_dependencies() {
     log_info "安装基础依赖..."
     
     # 更新包列表
-    sudo apt-get update -qq
+    if [[ $EUID -eq 0 ]]; then
+        apt-get update -qq
+    else
+        sudo apt-get update -qq
+    fi
     
     # 安装必要的包
     local packages=(
@@ -164,12 +168,17 @@ install_dependencies() {
         "ca-certificates"
         "gnupg"
         "lsb-release"
+        "net-tools"
     )
     
     for package in "${packages[@]}"; do
         if ! dpkg -l | grep -q "^ii  $package "; then
             log_info "安装: $package"
-            sudo apt-get install -y "$package" >/dev/null 2>&1
+            if [[ $EUID -eq 0 ]]; then
+                apt-get install -y "$package" >/dev/null 2>&1
+            else
+                sudo apt-get install -y "$package" >/dev/null 2>&1
+            fi
         fi
     done
     
@@ -192,8 +201,15 @@ create_work_directory() {
         fi
     fi
     
-    mkdir -p "$WORK_DIR"
-    mkdir -p "$WORK_DIR/config"
+    if [[ $EUID -eq 0 ]]; then
+        mkdir -p "$WORK_DIR"
+        mkdir -p "$WORK_DIR/config"
+    else
+        sudo mkdir -p "$WORK_DIR"
+        sudo mkdir -p "$WORK_DIR/config"
+        sudo chown -R "$USER:$USER" "$WORK_DIR"
+    fi
+    
     cd "$WORK_DIR"
     
     log_info "工作目录创建完成 ✓"
@@ -250,6 +266,55 @@ fix_script_config() {
     log_info "脚本配置完成 ✓"
 }
 
+# 配置kubectl
+setup_kubectl() {
+    log_info "配置kubectl..."
+    
+    # 设置KUBECONFIG环境变量
+    export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+    
+    if [[ $EUID -eq 0 ]]; then
+        # root用户直接使用
+        echo "export KUBECONFIG=/etc/rancher/k3s/k3s.yaml" >> /root/.bashrc
+    else
+        # 普通用户需要复制配置文件
+        mkdir -p "$HOME/.kube"
+        if [[ -f /etc/rancher/k3s/k3s.yaml ]]; then
+            sudo cp /etc/rancher/k3s/k3s.yaml "$HOME/.kube/config"
+            sudo chown "$USER:$USER" "$HOME/.kube/config"
+            export KUBECONFIG="$HOME/.kube/config"
+            echo "export KUBECONFIG=$HOME/.kube/config" >> "$HOME/.bashrc"
+        fi
+    fi
+    
+    # 创建kubectl配置脚本
+    cat > "$WORK_DIR/setup-kubectl.sh" << 'EOF'
+#!/bin/bash
+# kubectl配置脚本
+
+if [[ $EUID -eq 0 ]]; then
+    export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+else
+    if [[ -f "$HOME/.kube/config" ]]; then
+        export KUBECONFIG="$HOME/.kube/config"
+    else
+        export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+    fi
+fi
+
+# 测试连接
+if kubectl cluster-info &>/dev/null; then
+    echo "kubectl配置成功"
+else
+    echo "kubectl配置失败，请检查K3s状态"
+fi
+EOF
+    
+    chmod +x "$WORK_DIR/setup-kubectl.sh"
+    
+    log_info "kubectl配置完成 ✓"
+}
+
 # 验证安装
 verify_installation() {
     log_info "验证安装..."
@@ -259,6 +324,7 @@ verify_installation() {
         "cert-manager.sh"
         "config-templates.sh"
         "test-deployment.sh"
+        "setup-kubectl.sh"
     )
     
     for file in "${required_files[@]}"; do
@@ -284,6 +350,7 @@ show_usage() {
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo
     echo -e "${WHITE}工作目录:${NC} $WORK_DIR"
+    echo -e "${WHITE}当前用户:${NC} $(whoami)"
     echo
     echo -e "${YELLOW}🚀 快速开始:${NC}"
     echo -e "   ${BLUE}cd $WORK_DIR${NC}"
@@ -298,6 +365,7 @@ show_usage() {
     echo -e "${YELLOW}🛠️ 其他工具:${NC}"
     echo -e "   ${BLUE}./cert-manager.sh${NC}     # 证书管理工具"
     echo -e "   ${BLUE}./test-deployment.sh${NC}  # 部署测试工具"
+    echo -e "   ${BLUE}./setup-kubectl.sh${NC}    # kubectl配置工具"
     echo -e "   ${BLUE}less README.md${NC}        # 查看详细文档"
     echo
     echo -e "${RED}⚠️  部署前准备:${NC}"
@@ -305,6 +373,15 @@ show_usage() {
     echo -e "   • 配置路由器端口转发 (8080→8080, 8443→8443)"
     echo -e "   • 准备Cloudflare API Token"
     echo -e "   • 确保DDNS服务正常运行"
+    echo
+    echo -e "${CYAN}🔧 权限说明:${NC}"
+    if [[ $EUID -eq 0 ]]; then
+        echo -e "   • 当前以root用户运行，拥有完全权限"
+        echo -e "   • kubectl配置: /etc/rancher/k3s/k3s.yaml"
+    else
+        echo -e "   • 当前以普通用户运行，使用sudo权限"
+        echo -e "   • kubectl配置: $HOME/.kube/config"
+    fi
     echo
     echo -e "${GREEN}📖 详细文档:${NC} https://github.com/$GITHUB_USER/$GITHUB_REPO"
     echo
@@ -318,11 +395,18 @@ ask_start_deployment() {
     if [[ "$start_now" == "y" || "$start_now" == "Y" ]]; then
         echo
         log_info "启动Matrix部署工具..."
+        
+        # 确保kubectl配置正确
+        source "$WORK_DIR/setup-kubectl.sh"
+        
         exec ./matrix-deploy.sh
     else
         echo
         log_success "准备完成！请运行以下命令开始部署:"
         echo -e "  ${BLUE}cd $WORK_DIR && ./matrix-deploy.sh${NC}"
+        echo
+        echo -e "${YELLOW}如果遇到kubectl权限问题，请先运行:${NC}"
+        echo -e "  ${BLUE}./setup-kubectl.sh${NC}"
     fi
 }
 
@@ -355,6 +439,7 @@ main() {
     create_work_directory
     download_scripts
     fix_script_config
+    setup_kubectl
     verify_installation
     
     # 显示使用说明
