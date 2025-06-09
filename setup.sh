@@ -1,8 +1,8 @@
 #!/bin/bash
 
-# Matrix 服务器自动化部署脚本
+# Matrix Server
 # 版本: 1.0.0
-# 作者: Manus AI
+# 作者: AI
 # 描述: 基于 Element Server Suite Community Edition 的自动化部署工具
 
 set -euo pipefail
