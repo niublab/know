@@ -263,21 +263,27 @@ configure_parameters() {
         return 1
     fi
     
-    # 安装目录配置
+    # 安装目录配置 - REMOVE PROMPT, USE FIXED DEFAULT
     echo -e "${YELLOW}=== 安装目录配置 ===${NC}"
-    read -p "安装目录 [/opt/matrix]: " INSTALL_DIR
-    INSTALL_DIR=${INSTALL_DIR:-/opt/matrix}
-    
-    read -p "Kubernetes命名空间 [ess]: " NAMESPACE
-    NAMESPACE=${NAMESPACE:-ess}
-    
+    # read -p "安装目录 [/opt/matrix]: " INSTALL_DIR # REMOVED
+    INSTALL_DIR_DEFAULT="/opt/matrix"
+    INSTALL_DIR=${INSTALL_DIR:-$INSTALL_DIR_DEFAULT} # Keep this line to allow .env override
+    echo "安装目录将使用: $INSTALL_DIR (如需修改，请编辑 config/.env 文件后重新运行配置)"
+
+
+    # read -p "Kubernetes命名空间 [ess]: " NAMESPACE # REMOVED
+    NAMESPACE_DEFAULT="ess"
+    NAMESPACE=${NAMESPACE:-$NAMESPACE_DEFAULT} # Keep this line to allow .env override
+    echo "Kubernetes命名空间将使用: $NAMESPACE (如需修改，请编辑 config/.env 文件后重新运行配置)"
+
+
     # 证书配置
     echo -e "${YELLOW}=== 证书配置 ===${NC}"
     echo "1. 生产环境 (Let's Encrypt 生产)"
     echo "2. 测试环境 (Let's Encrypt 测试)"
-    read -p "请选择证书环境 [1-2]: " cert_env_choice
+    read -p "请选择证书环境 [2 (测试环境)]: " cert_env_choice # Changed prompt and default
     
-    case $cert_env_choice in
+    case ${cert_env_choice:-2} in # Default to 2 if empty
         1)
             CERT_ENV="production"
             ;;
@@ -285,7 +291,7 @@ configure_parameters() {
             CERT_ENV="staging"
             ;;
         *)
-            log_warn "无效选择，使用测试环境"
+            log_warn "无效选择或未选择，将使用测试环境。"
             CERT_ENV="staging"
             ;;
     esac
@@ -348,8 +354,8 @@ WEBRTC_TCP_PORT=$WEBRTC_TCP_PORT
 WEBRTC_UDP_PORT=$WEBRTC_UDP_PORT
 
 # 安装配置
-INSTALL_DIR=$INSTALL_DIR
-NAMESPACE=$NAMESPACE
+INSTALL_DIR=${INSTALL_DIR:-$INSTALL_DIR_DEFAULT} # Ensure it's saved
+NAMESPACE=${NAMESPACE:-$NAMESPACE_DEFAULT}     # Ensure it's saved
 
 # 证书配置
 CERT_ENV=$CERT_ENV
@@ -376,7 +382,8 @@ EOF
     echo -e "主域名: ${WHITE}$DOMAIN${NC}"
     echo -e "HTTP端口: ${WHITE}$HTTP_PORT${NC}"
     echo -e "HTTPS端口: ${WHITE}$HTTPS_PORT${NC}"
-    echo -e "安装目录: ${WHITE}$INSTALL_DIR${NC}"
+    echo -e "安装目录: ${WHITE}${INSTALL_DIR:-$INSTALL_DIR_DEFAULT}${NC}"
+    echo -e "Kubernetes命名空间: ${WHITE}${NAMESPACE:-$NAMESPACE_DEFAULT}${NC}"
     echo -e "证书环境: ${WHITE}$CERT_ENV${NC}"
     echo -e "联邦功能: ${WHITE}$ENABLE_FEDERATION${NC}"
     echo -e "用户注册: ${WHITE}$ENABLE_REGISTRATION${NC}"
@@ -394,161 +401,261 @@ EOF
 # 部署Matrix服务
 deploy_matrix() {
     log_info "部署Matrix服务..."
-    
+
     local config_file="$SCRIPT_DIR/config/.env"
     if [[ ! -f "$config_file" ]]; then
         log_error "配置文件不存在，请先配置服务参数"
         return 1
     fi
-    
+
     source "$config_file"
-    
+
     # 配置kubectl
     setup_kubectl_env
-    
+
     # 创建命名空间
     log_info "创建命名空间: $NAMESPACE"
     kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
-    
-    # 生成配置文件
-    log_info "生成配置文件..."
-    if [[ -f "$SCRIPT_DIR/config-templates.sh" ]]; then
-        source "$SCRIPT_DIR/config-templates.sh"
-        generate_complete_config "$config_file"
-    else
-        log_error "配置模板脚本不存在"
-        return 1
-    fi
-    
+
+    # 生成配置文件 (This part might need review if config-templates.sh also generates parts of values)
+    # log_info "生成配置文件..."
+    # if [[ -f "$SCRIPT_DIR/config-templates.sh" ]]; then
+    #     source "$SCRIPT_DIR/config-templates.sh"
+    #     generate_complete_config "$config_file" # Ensure this doesn't conflict with values.yaml generation
+    # else
+    #     log_error "配置模板脚本不存在"
+    #     return 1
+    # fi
+
     # 部署Matrix Stack
     log_info "部署Matrix Stack..."
-    
+
     # 创建values文件
     local values_file="$SCRIPT_DIR/config/values/matrix-values.yaml"
     mkdir -p "$(dirname "$values_file")"
-    
+
+    # Construct synapse additional config YAML string
+    # Note: Indentation within this HEREDOC is important for the final YAML
+    read -r -d '' synapse_additional_config_yaml << EOL_SYNAPSE_CONFIG
+public_baseurl: "https://$MATRIX_DOMAIN:$HTTPS_PORT"
+listeners:
+  - port: 8008
+    tls: false
+    type: http
+    x_forwarded: true
+    resources:
+      - names: [client, federation]
+        compress: false
+
+federation_domain_whitelist: null # Or configure as needed
+
+experimental_features:
+  msc3861: # For MAS
+    enabled: true
+    sso_url_base: "https://$ACCOUNT_DOMAIN:$HTTPS_PORT"
+    sso_client_id: "synapse"
+    # Ensure synapseOIDCClientSecret is generated and used if needed by MAS config
+
+# Enable registration if needed, this might be handled by MAS instead
+enable_registration: $ENABLE_REGISTRATION
+# if [ "$ENABLE_REGISTRATION" == "true" ]; then
+#   registration_shared_secret: "$REGISTRATION_TOKEN" # This might be managed by MAS or Synapse directly
+# fi
+
+# Federation settings
+federation_sender_instances:
+  - main
+worker_app: synapse.app.federation_sender
+
+# Well-known, can be complex if MAS is involved.
+# This is a simplified version assuming Synapse handles it directly for m.server
+# and client points to Synapse if MAS isn't the primary auth.
+# The new chart has \`wellKnownDelegation\` which might be a better place.
+# For now, keeping it in synapse.additional.config for direct control.
+serve_server_wellknown: true # This enables .well-known/matrix/server
+# client_wellknown_delegation: # This is more complex, depends on MAS.
+#   "m.homeserver":
+#     "base_url": "https://$MATRIX_DOMAIN:$HTTPS_PORT"
+#   "m.identity_server":
+#     "base_url": "https://$ACCOUNT_DOMAIN:$HTTPS_PORT"
+
+# Other settings from old values if necessary
+EOL_SYNAPSE_CONFIG
+    if [ "$ENABLE_FEDERATION" == "false" ]; then
+        synapse_additional_config_yaml=$(echo "$synapse_additional_config_yaml" | grep -v "federation_sender_instances" | grep -v "worker_app: synapse.app.federation_sender")
+        synapse_additional_config_yaml+=$'\n'"federation_enabled: false"
+    else
+        synapse_additional_config_yaml+=$'\n'"federation_enabled: true"
+    fi
+
+
+    # Construct MAS additional config YAML string
+    # Ensure DB user and service name are correct. The chart typically deploys postgresql with service name 'matrix-postgres' or 'postgresql'
+    # The user 'synapse' and its password '$POSTGRES_PASSWORD' are used here for MAS DB as well.
+    # Consider if MAS should have its own DB user/password.
+    read -r -d '' mas_additional_config_yaml << EOL_MAS_CONFIG
+database:
+  type: "postgresql"
+  uri: "postgresql://synapse:$POSTGRES_PASSWORD@matrix-postgres:5432/mas?sslmode=disable"
+
+http:
+  addr: "0.0.0.0:8080" # Internal listen address
+  issuer: "https://$ACCOUNT_DOMAIN:$HTTPS_PORT" # Public URL for MAS
+  # public_base should be what clients use. The ingress handles the external part.
+  # For MAS config, issuer and related URLs should use the public MAS domain.
+
+# Example OIDC client for Synapse, if Synapse delegates auth to MAS
+# Ensure this client_id and secret matches Synapse's msc3861 config
+# clients:
+#   - id: "synapse"
+#     secret: "YOUR_SYNAPSE_OIDC_CLIENT_SECRET" # Generate or use a fixed one
+#     redirect_uris:
+#       - "https://$MATRIX_DOMAIN:$HTTPS_PORT/_synapse/client/oidc/callback"
+#     trusted: true
+#     response_types:
+#       - "code"
+#     grant_types:
+#       - "authorization_code"
+#       - "refresh_token"
+#     scope: "openid profile email"
+
+# Default templates and other MAS specific settings
+EOL_MAS_CONFIG
+
+    # Construct Element Web additional config JSON string
+    # Using jq to ensure valid JSON, especially for boolean values
+    element_web_additional_config_json=$(jq -n \
+      --arg matrix_domain "https://$MATRIX_DOMAIN:$HTTPS_PORT" \
+      --arg server_name "$DOMAIN" \
+      --arg identity_server_url "https://$ACCOUNT_DOMAIN:$HTTPS_PORT" \
+      '{
+        "default_server_config": {
+          "m.homeserver": {
+            "base_url": $matrix_domain,
+            "server_name": $server_name
+          },
+          "m.identity_server": {
+            "base_url": $identity_server_url
+          }
+        },
+        "show_labs_flags": false,
+        "features": {
+          "feature_group_calls": true
+        }
+        # Add other Element config from old script here
+      }')
+
+
     cat > "$values_file" << EOF
-# Matrix Stack Values
-global:
-  domain: "$DOMAIN"
-  serverName: "$DOMAIN"
+# Matrix Stack Values - Generated by script
+# serverName is the new global domain setting
+serverName: "$DOMAIN"
 
-synapse:
-  enabled: true
-  serverName: "$DOMAIN"
-  publicBaseurl: "https://$MATRIX_DOMAIN:$HTTPS_PORT"
-  
-  postgresql:
-    enabled: true
-    auth:
-      password: "$POSTGRES_PASSWORD"
-      database: "synapse"
-      username: "synapse"
-  
-  signingKey: "$SYNAPSE_SIGNING_KEY"
-  macaroonSecretKey: "$SYNAPSE_MACAROON_SECRET"
-  
-  federation:
-    enabled: $ENABLE_FEDERATION
-    port: 8448
-    publicUrl: "https://$DOMAIN:$HTTPS_PORT"
-  
-  registration:
-    enabled: $ENABLE_REGISTRATION
-    registrationSharedSecret: "$REGISTRATION_TOKEN"
-  
-  wellknown:
-    enabled: true
-    server:
-      "m.server": "$MATRIX_DOMAIN:$HTTPS_PORT"
-    client:
-      "m.homeserver":
-        "base_url": "https://$MATRIX_DOMAIN:$HTTPS_PORT"
-      "m.identity_server":
-        "base_url": "https://$ACCOUNT_DOMAIN:$HTTPS_PORT"
-
-mas:
-  enabled: true
-  publicUrl: "https://$ACCOUNT_DOMAIN:$HTTPS_PORT"
-  
-  config:
-    secrets:
-      encryption: "$MAS_ENCRYPTION_KEY"
-      keys:
-        - kid: "default"
-          key: "$MAS_SECRET_KEY"
-    
-    database:
-      uri: "postgresql://synapse:$POSTGRES_PASSWORD@postgresql:5432/mas"
-    
-    http:
-      listeners:
-        - name: "web"
-          resources:
-            - name: "discovery"
-            - name: "human"
-            - name: "oauth"
-            - name: "compat"
-          binds:
-            - address: "0.0.0.0:8080"
-      public_base: "https://$ACCOUNT_DOMAIN:$HTTPS_PORT"
-      issuer: "https://$ACCOUNT_DOMAIN:$HTTPS_PORT"
-
-elementWeb:
-  enabled: true
-  publicUrl: "https://$CHAT_DOMAIN:$HTTPS_PORT"
-  
-  config:
-    default_server_config:
-      "m.homeserver":
-        "base_url": "https://$MATRIX_DOMAIN:$HTTPS_PORT"
-        "server_name": "$DOMAIN"
-      "m.identity_server":
-        "base_url": "https://$ACCOUNT_DOMAIN:$HTTPS_PORT"
-
+# Global ingress settings (can be overridden per component)
 ingress:
-  enabled: true
-  className: "traefik"
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: "web,websecure"
     traefik.ingress.kubernetes.io/router.tls: "true"
-  hosts:
-    - host: "$DOMAIN"
-      paths:
-        - path: /.well-known/matrix
-          pathType: Prefix
-    - host: "$MATRIX_DOMAIN"
-      paths:
-        - path: /
-          pathType: Prefix
-    - host: "$ACCOUNT_DOMAIN"
-      paths:
-        - path: /
-          pathType: Prefix
-    - host: "$CHAT_DOMAIN"
-      paths:
-        - path: /
-          pathType: Prefix
-  tls:
-    - hosts:
-        - "$DOMAIN"
-        - "$MATRIX_DOMAIN"
-        - "$ACCOUNT_DOMAIN"
-        - "$CHAT_DOMAIN"
-      secretName: matrix-tls
+    # Add other global annotations if needed
+  className: "traefik" # Assuming traefik is used
+  tlsEnabled: true
+  # tlsSecret: "matrix-tls" # Default secret name, or make it configurable. The chart might create one per component or a global one.
+
+# Enable postgres, as the script sets it up
+postgres:
+  enabled: true
+  # adminPassword: # If you need to set the postgres admin password
+  #   value: "$POSTGRES_PASSWORD" # Or a different admin password
+  essPasswords:
+    synapse:
+      value: "$POSTGRES_PASSWORD" # Password for the synapse DB user
+    matrixAuthenticationService: # Password for the MAS DB user
+      value: "$POSTGRES_PASSWORD" # Using same password for MAS DB user for simplicity.
+
+synapse:
+  enabled: true
+  ingress:
+    host: "$MATRIX_DOMAIN"
+    # annotations: {} # Component-specific ingress annotations
+    # tlsSecret: "synapse-tls" # Component-specific TLS secret
+  signingKey:
+    value: "$SYNAPSE_SIGNING_KEY"
+  macaroon:
+    value: "$SYNAPSE_MACAROON_SECRET"
+  # Most other synapse configs go into 'additional.config' as a YAML string
+  additional:
+    config: |
+$(echo "${synapse_additional_config_yaml}" | sed 's/^/      /')
+    # The sed command above is crucial to correctly indent the heredoc content
+
+matrixAuthenticationService:
+  enabled: true # Renamed from 'mas'
+  ingress:
+    host: "$ACCOUNT_DOMAIN"
+  encryptionSecret:
+    value: "$MAS_ENCRYPTION_KEY"
+  privateKeys:
+    rsa: # Assuming RSA key type, adjust if different
+      value: "$MAS_SECRET_KEY"
+  # Other MAS configs go into 'additional.config'
+  additional:
+    config: |
+$(echo "${mas_additional_config_yaml}" | sed 's/^/      /')
+
+elementWeb:
+  enabled: true
+  ingress:
+    host: "$CHAT_DOMAIN"
+  # Element Web config is typically a JSON string under additional.config
+  additional:
+    config: |
+$(echo "${element_web_additional_config_json}" | sed 's/^/      /')
+
+# Example for wellKnownDelegation if Synapse is not handling all of it
+# The new chart might handle .well-known at the top level or per component.
+# For now, synapse handles its own server well-known.
+# Client well-known is part of synapse.additional.config or element's config implicitly.
+# If a global .well-known for the serverName ($DOMAIN) is needed, configure wellKnownDelegation.
+# wellKnownDelegation:
+#   enabled: true
+#   ingress:
+#     host: "$DOMAIN" # The main domain for .well-known/matrix/server and /matrix/client
+#   additional:
+#     client: |
+#       {
+#         "m.homeserver": {
+#           "base_url": "https://$MATRIX_DOMAIN:$HTTPS_PORT"
+#         },
+#         "m.identity_server": {
+#           "base_url": "https://$ACCOUNT_DOMAIN:$HTTPS_PORT"
+#         }
+#       }
+#     server: |
+#       {
+#         "m.server": "$MATRIX_DOMAIN:$HTTPS_PORT" # Points to Synapse's federation endpoint
+#       }
+
+# Disable other components if not used by the script's default setup
+matrixRTC:
+  enabled: false # Assuming not part of the basic setup from the old script
+haproxy:
+  enabled: false # Assuming not part of the basic setup
+
 EOF
-    
+
     # 使用Helm部署
     log_info "使用Helm部署Matrix Stack..."
     helm upgrade --install matrix-stack \
         oci://ghcr.io/element-hq/ess-helm/matrix-stack \
+        --version 25.6.0 \
         --namespace "$NAMESPACE" \
         --values "$values_file" \
         --wait --timeout=600s
-    
+
     # 等待Pod启动
     log_info "等待服务启动..."
-    kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=synapse -n "$NAMESPACE" --timeout=300s || true
+    # Adjust label selectors based on actual deployed components by the chart
+    kubectl wait --for=condition=ready pod -l app.kubernetes.io/instance=matrix-stack -n "$NAMESPACE" --timeout=300s || true
     
     # 显示部署状态
     echo
@@ -557,9 +664,9 @@ EOF
     
     echo
     echo -e "${CYAN}=== 服务地址 ===${NC}"
-    echo -e "Matrix服务器: ${WHITE}https://$MATRIX_DOMAIN:$HTTPS_PORT${NC}"
-    echo -e "用户认证: ${WHITE}https://$ACCOUNT_DOMAIN:$HTTPS_PORT${NC}"
-    echo -e "Web客户端: ${WHITE}https://$CHAT_DOMAIN:$HTTPS_PORT${NC}"
+    echo -e "Matrix服务器 (Synapse): ${WHITE}https://$MATRIX_DOMAIN:$HTTPS_PORT${NC}"
+    echo -e "用户认证 (MAS):     ${WHITE}https://$ACCOUNT_DOMAIN:$HTTPS_PORT${NC}"
+    echo -e "Web客户端 (Element):  ${WHITE}https://$CHAT_DOMAIN:$HTTPS_PORT${NC}"
     
     log_info "Matrix服务部署完成"
 }
@@ -1009,7 +1116,7 @@ show_maintenance_menu() {
     echo -e "${GREEN}4.${NC} 优化系统性能"
     echo -e "${GREEN}5.${NC} 清理日志文件"
     echo -e "${GREEN}6.${NC} 检查磁盘使用"
-    echo -e "${GREEN}7.${NC} 运行测试脚本"
+    # echo -e "${GREEN}7.${NC} 运行测试脚本" # Option removed
     echo -e "${RED}0.${NC} 返回主菜单"
     echo
     echo -e "${YELLOW}请选择操作:${NC} "
@@ -1046,14 +1153,15 @@ handle_maintenance_menu() {
                 check_disk_usage
                 read -p "按回车键继续..."
                 ;;
-            7)
-                if [[ -f "$SCRIPT_DIR/test-deployment.sh" ]]; then
-                    "$SCRIPT_DIR/test-deployment.sh"
-                else
-                    log_error "测试脚本不存在"
-                fi
-                read -p "按回车键继续..."
-                ;;
+            # Case 7 removed as the option is no longer available
+            # 7)
+            #     if [[ -f "$SCRIPT_DIR/test-deployment.sh" ]]; then
+            #         "$SCRIPT_DIR/test-deployment.sh"
+            #     else
+            #         log_error "测试脚本不存在"
+            #     fi
+            #     read -p "按回车键继续..."
+            #     ;;
             0)
                 return
                 ;;
