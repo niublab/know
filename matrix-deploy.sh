@@ -94,9 +94,9 @@ get_external_ip() {
     fi
     
     # 备用方法
-    if [[ -z "$ip" ]]; then
-        ip=$(curl -s --connect-timeout 5 ifconfig.me 2>/dev/null || curl -s --connect-timeout 5 ipinfo.io/ip 2>/dev/null || echo "127.0.0.1")
-    fi
+    #if [[ -z "$ip" ]]; then
+    #    ip=$(curl -s --connect-timeout 5 ifconfig.me 2>/dev/null || curl -s --connect-timeout 5 ipinfo.io/ip 2>/dev/null || echo "127.0.0.1")
+    #fi
     
     echo "${ip:-127.0.0.1}"
 }
