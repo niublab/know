@@ -2066,16 +2066,6 @@ generate_registration_link() {
 list_users() {
     log_info "查看用户列表..."
 
-    # 获取MAS Pod
-    local mas_pod=$(kubectl get pods -n ess -l app.kubernetes.io/name=matrix-authentication-service -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-
-    if [[ -z "$mas_pod" ]]; then
-        log_error "无法找到Matrix Authentication Service Pod"
-        read -p "按任意键返回主菜单..."
-        show_main_menu
-        return 1
-    fi
-
     echo ""
     echo -e "${BLUE}================================${NC}"
     echo -e "${BLUE}用户列表${NC}"
@@ -2084,52 +2074,142 @@ list_users() {
     # 获取用户列表
     log_info "正在获取用户列表..."
 
-    # 基于实际情况，MAS CLI没有list-users命令，直接尝试数据库查询
-    log_info "MAS CLI不支持list-users命令，尝试从数据库获取用户信息..."
+    # 方法1：尝试通过MAS CLI（虽然可能不支持，但先试试）
+    local mas_pod=$(kubectl get pods -n ess -l app.kubernetes.io/name=matrix-authentication-service -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
 
-    # 获取Postgres Pod
-    local postgres_pod=$(kubectl get pods -n ess -l app.kubernetes.io/name=postgres -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-
-    if [[ -n "$postgres_pod" ]]; then
+    if [[ -n "$mas_pod" ]]; then
         echo ""
-        echo -e "${YELLOW}从数据库获取的用户信息：${NC}"
+        echo -e "${YELLOW}尝试通过MAS CLI获取用户信息...${NC}"
 
-        # 查询用户表（基于实际的数据库结构）
-        local db_query="SELECT username, display_name, email, created_at, locked_at IS NOT NULL as is_locked FROM users ORDER BY created_at;"
+        # 尝试一些可能的命令
+        local mas_commands=("manage list-users" "manage users" "users list" "user list")
+        local success=false
 
-        if kubectl exec -n ess "$postgres_pod" -- psql -U postgres -d matrixauthenticationservice -c "$db_query" 2>/dev/null; then
+        for cmd in "${mas_commands[@]}"; do
+            if kubectl exec -n ess "$mas_pod" -- mas-cli $cmd 2>/dev/null; then
+                success=true
+                break
+            fi
+        done
+
+        if [[ "$success" == "false" ]]; then
+            log_info "MAS CLI不支持用户列表命令，尝试数据库查询..."
+        else
             echo ""
             echo -e "${GREEN}用户列表获取成功${NC}"
-        else
-            log_warning "无法连接到数据库或查询失败"
             echo ""
-            echo -e "${YELLOW}可能的原因：${NC}"
-            echo "- 数据库连接失败"
-            echo "- 数据库名称或表结构不匹配"
-            echo "- 权限不足"
+            echo -e "${BLUE}用户管理提示：${NC}"
+            echo "- 创建用户: 菜单选项 2"
+            echo "- 修改权限: 菜单选项 3"
+            echo "- 生成注册链接: 菜单选项 4"
             echo ""
-            echo -e "${BLUE}替代方案：${NC}"
-            echo "1. 检查数据库状态: kubectl get pods -n ess | grep postgres"
-            echo "2. 查看数据库日志: kubectl logs -n ess <postgres-pod>"
-            echo "3. 使用其他用户管理功能"
+            echo -e "${BLUE}================================${NC}"
+            read -p "按任意键返回主菜单..."
+            show_main_menu
+            return 0
         fi
-    else
-        log_warning "无法找到PostgreSQL数据库Pod"
-        echo ""
-        echo -e "${YELLOW}检查数据库状态：${NC}"
-        kubectl get pods -n ess | grep -E "(postgres|database)" || echo "未找到数据库相关Pod"
-        echo ""
-        echo -e "${BLUE}建议的操作：${NC}"
-        echo "1. 检查ESS服务状态: kubectl get pods -n ess"
-        echo "2. 确认数据库服务是否正常运行"
-        echo "3. 使用其他用户管理功能创建和管理用户"
     fi
 
+    # 方法2：尝试数据库查询
     echo ""
-    echo -e "${BLUE}用户管理提示：${NC}"
-    echo "- 创建用户: 菜单选项 2"
-    echo "- 修改权限: 菜单选项 3 (设置管理员、禁用/启用用户)"
-    echo "- 生成注册链接: 菜单选项 4"
+    echo -e "${YELLOW}尝试从数据库获取用户信息...${NC}"
+
+    # 查找数据库Pod（尝试多种可能的标签）
+    local postgres_pod=""
+    local db_selectors=(
+        "app.kubernetes.io/name=postgres"
+        "app.kubernetes.io/name=postgresql"
+        "app=postgres"
+        "app=postgresql"
+        "component=database"
+    )
+
+    for selector in "${db_selectors[@]}"; do
+        postgres_pod=$(kubectl get pods -n ess -l "$selector" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+        if [[ -n "$postgres_pod" ]]; then
+            log_info "找到数据库Pod: $postgres_pod (使用选择器: $selector)"
+            break
+        fi
+    done
+
+    if [[ -n "$postgres_pod" ]]; then
+        # 尝试多种可能的数据库配置
+        local db_configs=(
+            "postgres:matrixauthenticationservice"
+            "postgres:mas"
+            "mas:matrixauthenticationservice"
+            "mas:mas"
+            "root:matrixauthenticationservice"
+        )
+
+        local success=false
+        for config in "${db_configs[@]}"; do
+            local db_user="${config%%:*}"
+            local db_name="${config##*:}"
+
+            echo ""
+            echo -e "${BLUE}尝试连接: 用户=$db_user, 数据库=$db_name${NC}"
+
+            # 尝试查询用户表
+            local queries=(
+                "SELECT username, display_name, email, created_at, locked_at IS NOT NULL as is_locked FROM users ORDER BY created_at;"
+                "SELECT username, email, created_at FROM users ORDER BY created_at;"
+                "SELECT * FROM users LIMIT 10;"
+                "\\dt"  # 列出所有表
+            )
+
+            for query in "${queries[@]}"; do
+                if kubectl exec -n ess "$postgres_pod" -- psql -U "$db_user" -d "$db_name" -c "$query" 2>/dev/null; then
+                    success=true
+                    echo ""
+                    echo -e "${GREEN}数据库查询成功！${NC}"
+                    break 2
+                fi
+            done
+        done
+
+        if [[ "$success" == "false" ]]; then
+            echo ""
+            log_warning "尝试了多种数据库配置，但都无法成功查询"
+            echo ""
+            echo -e "${YELLOW}调试信息：${NC}"
+            echo "数据库Pod: $postgres_pod"
+            echo ""
+            echo -e "${BLUE}手动调试步骤：${NC}"
+            echo "1. 进入数据库Pod: kubectl exec -it -n ess $postgres_pod -- bash"
+            echo "2. 查看数据库列表: psql -U postgres -l"
+            echo "3. 连接数据库: psql -U postgres -d <database_name>"
+            echo "4. 查看表: \\dt"
+            echo "5. 查看用户表: SELECT * FROM users;"
+        fi
+    else
+        echo ""
+        log_warning "未找到数据库Pod"
+        echo ""
+        echo -e "${YELLOW}当前ESS Pod状态：${NC}"
+        kubectl get pods -n ess
+        echo ""
+        echo -e "${BLUE}可能的原因：${NC}"
+        echo "- ESS使用外部数据库"
+        echo "- 数据库Pod使用不同的标签"
+        echo "- 数据库服务未正常启动"
+    fi
+
+    # 方法3：提供替代方案
+    echo ""
+    echo -e "${BLUE}================================${NC}"
+    echo -e "${BLUE}替代用户管理方案${NC}"
+    echo -e "${BLUE}================================${NC}"
+    echo ""
+    echo -e "${GREEN}可用的用户管理功能：${NC}"
+    echo "1. 创建新用户 (菜单选项 2)"
+    echo "2. 修改用户权限 (菜单选项 3)"
+    echo "3. 生成注册链接 (菜单选项 4)"
+    echo ""
+    echo -e "${YELLOW}获取用户信息的其他方法：${NC}"
+    echo "- 查看MAS管理界面"
+    echo "- 检查Synapse管理API"
+    echo "- 查看ESS日志中的用户活动"
     echo ""
     echo -e "${BLUE}================================${NC}"
 
