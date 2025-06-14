@@ -407,9 +407,7 @@ synapse:
   ingress:
     host: $synapse_host
 
-wellKnownDelegation:
-  ingress:
-    host: $server_name
+# wellKnownDelegation 使用 serverName 自动配置，不需要单独的 ingress.host
 EOF
 
     # 创建 TLS 配置文件

@@ -1,0 +1,55 @@
+ESS Community 自动部署脚本 - 待改进问题记录
+==============================================
+
+记录时间：2025年6月14日
+脚本版本：1.0.0
+
+问题1：域名输入方式需要优化
+--------------------
+当前问题：
+- 提示"请输入 Synapse 域名 (例如: matrix.example.com)"需要输入完整子域名
+- 用户体验不好，需要重复输入主域名部分
+- 容易出错，用户可能输入不一致的主域名
+- 不够灵活，批量修改域名很麻烦
+
+改进方案：
+方案A：先输入主域名，再输入子域名前缀
+方案B：主域名+默认子域名前缀（可自定义）
+
+影响范围：
+- create_basic_config() 函数
+- 所有域名输入相关的交互
+- 配置文件生成逻辑
+
+优先级：中等
+状态：待处理
+
+问题2：wellKnownDelegation.ingress配置错误
+------------------------------------
+错误信息：
+- wellKnownDelegation.ingress: Additional property host is not allowed
+- Helm部署失败，values文件不符合schema规范
+
+当前错误配置：
+wellKnownDelegation:
+  ingress:
+    host: example.com  # 这个配置不被允许
+
+问题分析：
+- ESS 25.6.1版本的schema可能已经改变
+- wellKnownDelegation的ingress配置方式可能不同于其他组件
+- 需要查看官方values.yaml中wellKnownDelegation的正确配置格式
+
+解决方案：
+1. 检查官方values.yaml中wellKnownDelegation的正确配置
+2. 修改create_basic_config()函数中的配置生成
+3. 可能需要移除wellKnownDelegation.ingress.host配置
+
+影响范围：
+- create_basic_config() 函数
+- hostnames.yaml 配置文件生成
+
+优先级：高（阻塞部署）
+状态：待处理
+
+==============================================
