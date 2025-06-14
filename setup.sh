@@ -120,13 +120,33 @@ check_network() {
         "https://ghcr.io"
     )
     
+    local failed_urls=()
     for url in "${test_urls[@]}"; do
         if ! curl -s --connect-timeout 10 "$url" >/dev/null; then
-            log_error "无法连接到 $url"
-            log_error "请检查网络连接和防火墙设置"
-            exit 1
+            failed_urls+=("$url")
+            log_warning "无法连接到 $url"
         fi
     done
+
+    if [[ ${#failed_urls[@]} -gt 0 ]]; then
+        log_error "网络连接检查失败，无法访问以下URL："
+        for url in "${failed_urls[@]}"; do
+            echo "  - $url"
+        done
+        echo ""
+        echo "可能的解决方案："
+        echo "1. 检查网络连接"
+        echo "2. 检查防火墙设置"
+        echo "3. 检查DNS解析"
+        echo "4. 如果在中国大陆，可能需要配置代理"
+        echo ""
+        read -p "是否继续安装？[y/N]: " continue_install || continue_install=""
+        if [[ ! "$continue_install" =~ ^[Yy]$ ]]; then
+            log_info "安装已取消"
+            exit 1
+        fi
+        log_warning "继续安装，但可能会遇到下载问题"
+    fi
     
     log_success "网络连通性检查完成"
 }
@@ -151,7 +171,9 @@ install_k3s() {
 
     # 设置文件所有者（仅在非root用户时需要）
     if [[ $EUID -ne 0 ]]; then
-        chown "$USER:$USER" "$KUBE_CONFIG"
+        if ! chown "$USER:$USER" "$KUBE_CONFIG" 2>/dev/null; then
+            log_warning "无法设置kubeconfig文件所有者，但这不影响功能"
+        fi
     fi
 
     # 添加到 bashrc
@@ -263,19 +285,30 @@ configure_cloudflare_dns() {
     echo -e "${YELLOW}=========================================${NC}"
     echo ""
 
-    read -p "请输入 Cloudflare API Token: " cf_token
-    read -p "请输入证书申请邮箱地址: " cert_email
+    read -p "请输入 Cloudflare API Token: " cf_token || cf_token=""
+    read -p "请输入证书申请邮箱地址: " cert_email || cert_email=""
 
     echo ""
     echo "选择证书环境:"
     echo "1) 生产环境 (Let's Encrypt Production) - 推荐"
     echo "2) 测试环境 (Let's Encrypt Staging) - 用于测试"
-    read -p "请选择 [1-2]: " cert_env
+    read -p "请选择 [1-2]: " cert_env || cert_env=""
 
     # 验证输入
     if [[ -z "$cf_token" || -z "$cert_email" ]]; then
         log_error "API Token 和邮箱地址不能为空"
         return 1
+    fi
+
+    # 验证邮箱格式
+    if [[ ! "$cert_email" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+        log_error "邮箱地址格式不正确"
+        return 1
+    fi
+
+    # 验证API Token格式（Cloudflare API Token通常是40个字符）
+    if [[ ${#cf_token} -lt 20 ]]; then
+        log_warning "API Token 长度似乎不正确，请确认是否为有效的 Cloudflare API Token"
     fi
 
     # 创建 Cloudflare API Token Secret
@@ -332,7 +365,7 @@ EOF
 
     # 可选：验证API Token
     echo ""
-    read -p "是否验证 API Token 有效性？[y/N]: " verify_token
+    read -p "是否验证 API Token 有效性？[y/N]: " verify_token || verify_token=""
     if [[ "$verify_token" =~ ^[Yy]$ ]]; then
         verify_cloudflare_token "$cf_token"
     fi
@@ -371,17 +404,35 @@ verify_cloudflare_token() {
 create_basic_config() {
     log_info "创建基础配置文件..."
 
-    # 获取用户输入
-    read -p "请输入服务器域名 (例如: example.com): " server_name
-    read -p "请输入 Synapse 域名 (例如: matrix.example.com): " synapse_host
-    read -p "请输入认证服务域名 (例如: account.example.com): " auth_host
-    read -p "请输入 RTC 服务域名 (例如: mrtc.example.com): " rtc_host
-    read -p "请输入 Web 客户端域名 (例如: chat.example.com): " web_host
+    # 获取用户输入（添加失败处理）
+    read -p "请输入服务器域名 (例如: example.com): " server_name || server_name=""
+    read -p "请输入 Synapse 域名 (例如: matrix.example.com): " synapse_host || synapse_host=""
+    read -p "请输入认证服务域名 (例如: account.example.com): " auth_host || auth_host=""
+    read -p "请输入 RTC 服务域名 (例如: mrtc.example.com): " rtc_host || rtc_host=""
+    read -p "请输入 Web 客户端域名 (例如: chat.example.com): " web_host || web_host=""
 
     # 验证输入
     if [[ -z "$server_name" || -z "$synapse_host" || -z "$auth_host" || -z "$rtc_host" || -z "$web_host" ]]; then
         log_error "所有域名都不能为空"
         return 1
+    fi
+
+    # 验证域名格式
+    local domain_regex="^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$"
+    local domains=("$server_name" "$synapse_host" "$auth_host" "$rtc_host" "$web_host")
+    local domain_names=("服务器域名" "Synapse域名" "认证服务域名" "RTC服务域名" "Web客户端域名")
+
+    for i in "${!domains[@]}"; do
+        if [[ ! "${domains[$i]}" =~ $domain_regex ]]; then
+            log_error "${domain_names[$i]} 格式不正确: ${domains[$i]}"
+            return 1
+        fi
+    done
+
+    # 检查域名是否重复
+    local unique_domains=($(printf '%s\n' "${domains[@]}" | sort -u))
+    if [[ ${#unique_domains[@]} -ne ${#domains[@]} ]]; then
+        log_warning "检测到重复的域名，请确认这是否符合您的预期"
     fi
 
     # 创建主机名配置文件
@@ -432,17 +483,43 @@ deploy_ess() {
     fi
 
     # 部署 ESS
-    helm upgrade --install --namespace "$NAMESPACE" ess \
+    log_info "正在部署 ESS Community，这可能需要几分钟..."
+
+    if helm upgrade --install --namespace "$NAMESPACE" ess \
         oci://ghcr.io/element-hq/ess-helm/matrix-stack \
         -f "$CONFIG_DIR/hostnames.yaml" \
         -f "$CONFIG_DIR/tls.yaml" \
         --wait \
-        --timeout=10m
+        --timeout=10m; then
 
-    if [[ $? -eq 0 ]]; then
         log_success "ESS Community 部署完成"
+
+        # 等待所有Pod启动
+        log_info "等待所有服务启动..."
+        sleep 10
+
+        # 显示部署状态
+        echo ""
+        echo -e "${BLUE}部署状态：${NC}"
+        kubectl get pods -n "$NAMESPACE"
+
+        echo ""
+        echo -e "${BLUE}服务状态：${NC}"
+        kubectl get svc -n "$NAMESPACE"
+
+        echo ""
+        echo -e "${BLUE}Ingress状态：${NC}"
+        kubectl get ingress -n "$NAMESPACE"
+
     else
         log_error "ESS Community 部署失败"
+        echo ""
+        echo -e "${YELLOW}故障排除信息：${NC}"
+        echo "查看Pod状态："
+        kubectl get pods -n "$NAMESPACE"
+        echo ""
+        echo "查看最近的事件："
+        kubectl get events -n "$NAMESPACE" --sort-by='.lastTimestamp' | tail -10
         return 1
     fi
 }
@@ -531,7 +608,7 @@ show_main_menu() {
     echo "8) 查看安装状态"
     echo "0) 退出"
     echo ""
-    read -p "请输入选择 [0-8]: " choice
+    read -p "请输入选择 [0-8]: " choice || choice=""
 
     case $choice in
         1) full_install ;;
@@ -583,22 +660,65 @@ deploy_ess_only() {
 full_install() {
     log_info "开始完整安装..."
 
+    echo ""
+    echo -e "${YELLOW}完整安装将执行以下步骤：${NC}"
+    echo "1. 检查系统要求"
+    echo "2. 检查网络连通性"
+    echo "3. 安装 K3s (Kubernetes)"
+    echo "4. 安装 Helm"
+    echo "5. 创建命名空间和配置目录"
+    echo "6. 安装 cert-manager"
+    echo "7. 配置 Cloudflare DNS 证书"
+    echo "8. 创建基础配置"
+    echo "9. 部署 ESS Community"
+    echo ""
+    echo -e "${RED}注意：此过程可能需要10-30分钟，取决于网络速度${NC}"
+    echo ""
+    read -p "确认开始完整安装？[y/N]: " confirm_install || confirm_install=""
+
+    if [[ ! "$confirm_install" =~ ^[Yy]$ ]]; then
+        log_info "安装已取消"
+        show_main_menu
+        return 0
+    fi
+
+    echo ""
+    log_info "步骤 1/9: 检查系统要求..."
     check_system_requirements
+
+    log_info "步骤 2/9: 检查网络连通性..."
     check_network
+
+    log_info "步骤 3/9: 安装 K3s..."
     install_k3s
+
+    log_info "步骤 4/9: 安装 Helm..."
     install_helm
+
+    log_info "步骤 5/9: 创建命名空间和配置目录..."
     create_namespace
     create_config_directory
+
+    log_info "步骤 6/9: 安装 cert-manager..."
     install_cert_manager
 
-    log_info "基础组件安装完成，开始配置 ESS..."
-
+    log_info "步骤 7/9: 配置 Cloudflare DNS 证书..."
     configure_cloudflare_dns
+
+    log_info "步骤 8/9: 创建基础配置..."
     create_basic_config
+
+    log_info "步骤 9/9: 部署 ESS Community..."
     deploy_ess
 
-    log_success "ESS Community 完整安装完成！"
-    log_info "请使用选项 6 创建初始用户"
+    echo ""
+    echo -e "${GREEN}🎉 ESS Community 完整安装完成！${NC}"
+    echo ""
+    echo -e "${BLUE}下一步操作：${NC}"
+    echo "1. 使用选项 6 创建初始用户"
+    echo "2. 使用选项 7 验证部署状态"
+    echo "3. 访问您配置的域名测试功能"
+    echo ""
 
     read -p "按任意键返回主菜单..."
     show_main_menu
