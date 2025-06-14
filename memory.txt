@@ -628,6 +628,23 @@ matrixAuthenticationService:
 - 提供helm upgrade命令应用配置
 
 优先级：最高（解决认证问题的根本原因）
-状态：需要修改manage.sh脚本实现
+状态：✅ 已解决！
+
+解决方案实施：
+✅ 方案3（直接编辑ConfigMap）效果最佳
+✅ 手动修复验证成功：
+   - ConfigMap更新: public_base: "https://mas.niub.win:8443"
+   - MAS页面显示正确链接
+   - OpenID配置所有URL包含端口8443
+✅ manage.sh脚本已完善：
+   - 添加fix_mas_configmap()函数
+   - 集成到完整配置流程
+   - 提供独立修复选项（菜单11）
+   - 包含完整的备份和验证机制
+
+技术验证：
+- issuer正确: "issuer":"https://mas.niub.win:8443/"
+- 所有端点包含端口: authorize, token, keys.json, account等
+- 从根源解决URL生成问题，性能最优
 
 ==============================================

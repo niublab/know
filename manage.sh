@@ -265,18 +265,19 @@ show_main_menu() {
     echo "10) 查看用户列表"
     echo ""
     echo -e "${GREEN}=== ESS配置管理 ===${NC}"
-    echo "11) 生成ESS外部URL配置"
-    echo "12) 应用ESS外部URL配置"
+    echo "11) 修复MAS ConfigMap端口问题 (推荐)"
+    echo "12) 生成ESS外部URL配置"
+    echo "13) 应用ESS外部URL配置"
     echo ""
     echo -e "${GREEN}=== 系统管理 ===${NC}"
-    echo "13) 查看系统状态"
-    echo "14) 查看服务日志"
-    echo "15) 重启服务"
-    echo "16) 备份配置"
+    echo "14) 查看系统状态"
+    echo "15) 查看服务日志"
+    echo "16) 重启服务"
+    echo "17) 备份配置"
     echo ""
     echo "0) 退出"
     echo ""
-    read -p "请输入选择 [0-16]: " choice
+    read -p "请输入选择 [0-17]: " choice
 
     case $choice in
         1) full_setup ;;
@@ -289,12 +290,13 @@ show_main_menu() {
         8) modify_user_permissions ;;
         9) generate_registration_link ;;
         10) list_users ;;
-        11) generate_ess_config_only ;;
-        12) apply_ess_config_only ;;
-        13) show_status ;;
-        14) show_logs ;;
-        15) restart_services ;;
-        16) backup_config ;;
+        11) fix_mas_configmap_only ;;
+        12) generate_ess_config_only ;;
+        13) apply_ess_config_only ;;
+        14) show_status ;;
+        15) show_logs ;;
+        16) restart_services ;;
+        17) backup_config ;;
         0) exit 0 ;;
         *)
             log_error "无效选择"
@@ -936,14 +938,188 @@ EOF
     log_info "此配置修复了MAS、Synapse等服务的外部URL端口问题"
 }
 
+# 备份当前ESS配置
+backup_ess_config() {
+    log_info "备份当前ESS配置..."
+
+    local backup_dir="$ESS_CONFIG_DIR/backup-$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$backup_dir"
+
+    # 备份helm values
+    if helm get values ess -n ess > "$backup_dir/current-values.yaml" 2>/dev/null; then
+        log_success "helm values备份完成: $backup_dir/current-values.yaml"
+    else
+        log_warning "helm values备份失败"
+    fi
+
+    # 备份ConfigMaps
+    if kubectl get configmap -n ess -o yaml > "$backup_dir/configmaps.yaml" 2>/dev/null; then
+        log_success "ConfigMaps备份完成: $backup_dir/configmaps.yaml"
+    else
+        log_warning "ConfigMaps备份失败"
+    fi
+
+    echo "$backup_dir" # 返回备份目录路径
+}
+
+# 验证ESS配置文件
+validate_ess_config() {
+    local config_file="$1"
+
+    log_info "验证ESS配置文件..."
+
+    # 检查文件存在
+    if [[ ! -f "$config_file" ]]; then
+        log_error "配置文件不存在: $config_file"
+        return 1
+    fi
+
+    # 检查YAML语法（简单验证）
+    if ! python3 -c "import yaml; yaml.safe_load(open('$config_file'))" 2>/dev/null; then
+        log_error "YAML格式验证失败: $config_file"
+        log_info "请检查配置文件语法"
+        return 1
+    fi
+
+    log_success "配置文件验证通过"
+    return 0
+}
+
+# 获取ESS chart信息
+get_ess_chart_info() {
+    log_info "获取ESS chart信息..."
+
+    # 从helm release获取chart信息
+    local chart_info=$(helm list -n ess -o json 2>/dev/null | grep -o '"chart":"[^"]*"' | head -1 | cut -d'"' -f4)
+
+    if [[ -n "$chart_info" ]]; then
+        echo "$chart_info"
+        return 0
+    fi
+
+    # 备用方法：从status获取
+    chart_info=$(helm status ess -n ess -o json 2>/dev/null | grep -o '"chart":"[^"]*"' | cut -d'"' -f4)
+
+    if [[ -n "$chart_info" ]]; then
+        echo "$chart_info"
+        return 0
+    fi
+
+    log_warning "无法获取chart信息，将尝试使用--reuse-values"
+    return 1
+}
+
+# 修复MAS ConfigMap中的端口问题（方案3：直接修改ConfigMap）
+fix_mas_configmap() {
+    log_info "修复MAS ConfigMap中的端口问题..."
+
+    # 检查当前MAS ConfigMap中的public_base配置
+    local current_public_base=$(kubectl get configmap ess-matrix-authentication-service -n ess -o yaml 2>/dev/null | grep "public_base:" | awk '{print $2}' | tr -d '"')
+
+    if [[ -z "$current_public_base" ]]; then
+        log_error "无法获取MAS ConfigMap中的public_base配置"
+        return 1
+    fi
+
+    log_info "当前public_base配置: $current_public_base"
+
+    # 检查是否需要修复
+    local expected_public_base="https://$MAS_HOST:$EXTERNAL_HTTPS_PORT"
+
+    if [[ "$current_public_base" == "$expected_public_base" ]]; then
+        log_success "MAS ConfigMap配置已正确，无需修复"
+        return 0
+    fi
+
+    log_warning "需要修复MAS ConfigMap配置"
+    log_info "当前值: $current_public_base"
+    log_info "期望值: $expected_public_base"
+
+    read -p "确认修复MAS ConfigMap? [y/N]: " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        log_info "操作已取消"
+        return 0
+    fi
+
+    # 备份当前ConfigMap
+    local backup_file="$ESS_CONFIG_DIR/mas-configmap-backup-$(date +%Y%m%d-%H%M%S).yaml"
+    if kubectl get configmap ess-matrix-authentication-service -n ess -o yaml > "$backup_file" 2>/dev/null; then
+        log_success "ConfigMap备份完成: $backup_file"
+    else
+        log_warning "ConfigMap备份失败"
+    fi
+
+    # 修复ConfigMap
+    log_info "正在修复MAS ConfigMap..."
+
+    # 使用kubectl patch修改public_base
+    local patch_data="{\"data\":{\"config.yaml\":\"$(kubectl get configmap ess-matrix-authentication-service -n ess -o jsonpath='{.data.config\.yaml}' | sed "s|public_base: \"[^\"]*\"|public_base: \"$expected_public_base\"|")\"}}"
+
+    if kubectl patch configmap ess-matrix-authentication-service -n ess --type merge -p "$patch_data"; then
+        log_success "MAS ConfigMap修复成功"
+    else
+        log_error "MAS ConfigMap修复失败"
+        return 1
+    fi
+
+    # 重启MAS服务
+    log_info "重启MAS服务以应用新配置..."
+    if kubectl rollout restart deployment ess-matrix-authentication-service -n ess; then
+        log_success "MAS服务重启命令已执行"
+
+        # 等待重启完成
+        log_info "等待MAS服务重启完成..."
+        if kubectl rollout status deployment ess-matrix-authentication-service -n ess --timeout=300s; then
+            log_success "MAS服务重启完成"
+        else
+            log_warning "MAS服务重启超时，请手动检查状态"
+        fi
+    else
+        log_error "MAS服务重启失败"
+        return 1
+    fi
+
+    # 验证修复效果
+    log_info "验证修复效果..."
+    sleep 10
+
+    local new_public_base=$(kubectl get configmap ess-matrix-authentication-service -n ess -o yaml 2>/dev/null | grep "public_base:" | awk '{print $2}' | tr -d '"')
+
+    if [[ "$new_public_base" == "$expected_public_base" ]]; then
+        log_success "MAS ConfigMap修复验证成功: $new_public_base"
+
+        # 测试OpenID配置
+        log_info "测试OpenID配置..."
+        if curl -k -s "https://$MAS_HOST:$EXTERNAL_HTTPS_PORT/.well-known/openid-configuration" | grep -q "\"issuer\":\"$expected_public_base/\""; then
+            log_success "OpenID配置验证成功，所有URL包含正确端口"
+        else
+            log_warning "OpenID配置可能需要更多时间生效"
+        fi
+    else
+        log_error "MAS ConfigMap修复验证失败"
+        log_info "当前值: $new_public_base"
+        log_info "期望值: $expected_public_base"
+        log_info "备份文件: $backup_file"
+        return 1
+    fi
+
+    log_success "MAS端口问题修复完成！"
+    log_info "备份文件: $backup_file"
+}
+
 # 应用ESS配置
 apply_ess_config() {
     log_info "应用ESS外部URL配置..."
 
     local config_file="$ESS_CONFIG_DIR/external-urls.yaml"
+    local hostnames_file="$ESS_CONFIG_DIR/hostnames.yaml"
 
-    if [[ ! -f "$config_file" ]]; then
-        log_error "ESS外部URL配置文件不存在: $config_file"
+    # 验证配置文件
+    if ! validate_ess_config "$config_file"; then
+        return 1
+    fi
+
+    if ! validate_ess_config "$hostnames_file"; then
         return 1
     fi
 
@@ -955,39 +1131,82 @@ apply_ess_config() {
     fi
 
     # 查找ESS helm release
-    local ess_release=$(helm list -n ess -o json | jq -r '.[0].name' 2>/dev/null || echo "")
+    local ess_release="ess"  # 基于检查结果，release名为ess
 
-    if [[ -z "$ess_release" ]]; then
-        log_error "无法找到ESS helm release"
+    if ! helm status "$ess_release" -n ess >/dev/null 2>&1; then
+        log_error "无法找到ESS helm release: $ess_release"
         log_info "请手动应用配置文件: $config_file"
         return 1
     fi
 
     log_info "找到ESS release: $ess_release"
+
+    # 备份当前配置
+    local backup_dir=$(backup_ess_config)
+
+    # 获取chart信息
+    local chart_info=$(get_ess_chart_info)
+
     log_warning "即将重新部署ESS以应用外部URL配置"
     log_warning "这将重启ESS服务，可能造成短暂中断"
+    log_info "备份目录: $backup_dir"
 
     read -p "确认继续? [y/N]: " confirm
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
         log_info "操作已取消"
         log_info "配置文件已生成: $config_file"
-        log_info "您可以稍后手动应用此配置"
+        log_info "备份已保存: $backup_dir"
         return 0
+    fi
+
+    # 执行dry-run测试
+    log_info "执行配置测试 (dry-run)..."
+    if helm upgrade "$ess_release" -n ess \
+        -f "$hostnames_file" \
+        -f "$config_file" \
+        --reuse-values \
+        --dry-run >/dev/null 2>&1; then
+        log_success "配置测试通过"
+    else
+        log_error "配置测试失败，请检查配置文件"
+        log_info "备份已保存: $backup_dir"
+        return 1
     fi
 
     # 应用配置
     log_info "正在应用ESS配置..."
     if helm upgrade "$ess_release" -n ess \
-        -f "$ESS_CONFIG_DIR/hostnames.yaml" \
+        -f "$hostnames_file" \
         -f "$config_file" \
         --reuse-values; then
         log_success "ESS配置应用成功"
-        log_info "等待ESS服务重启..."
-        sleep 30
+
+        # 等待服务重启
+        log_info "等待MAS服务重启..."
+        if kubectl rollout status deployment ess-matrix-authentication-service -n ess --timeout=300s; then
+            log_success "MAS服务重启完成"
+        else
+            log_warning "MAS服务重启超时，请手动检查状态"
+        fi
+
+        # 验证配置是否生效
+        log_info "验证配置是否生效..."
+        sleep 10
+
+        local new_public_base=$(kubectl get configmap ess-matrix-authentication-service -n ess -o yaml | grep "public_base:" | awk '{print $2}' | tr -d '"')
+        if [[ "$new_public_base" == "https://mas.niub.win:$EXTERNAL_HTTPS_PORT" ]]; then
+            log_success "MAS外部URL配置已生效: $new_public_base"
+        else
+            log_warning "MAS外部URL配置可能未生效，当前值: $new_public_base"
+        fi
+
         log_info "请检查ESS服务状态: kubectl get pods -n ess"
+        log_info "备份已保存: $backup_dir"
     else
         log_error "ESS配置应用失败"
-        log_info "请检查配置文件并手动应用: $config_file"
+        log_info "请检查配置文件: $config_file"
+        log_info "备份已保存: $backup_dir"
+        log_info "如需回滚，请运行: helm rollback $ess_release -n ess"
         return 1
     fi
 }
@@ -1028,8 +1247,18 @@ full_setup() {
         # 配置防火墙
         configure_firewall
 
-        # 生成ESS外部URL配置
-        generate_ess_external_config
+        # 修复MAS ConfigMap端口问题（推荐方案）
+        echo ""
+        echo -e "${YELLOW}重要：修复MAS等服务的URL端口问题${NC}"
+        echo "检测到需要修复ESS服务的外部URL配置"
+        echo ""
+        read -p "是否现在修复MAS ConfigMap端口问题? [Y/n]: " fix_mas_now
+        if [[ ! "$fix_mas_now" =~ ^[Nn]$ ]]; then
+            fix_mas_configmap
+        else
+            log_info "跳过MAS ConfigMap修复"
+            log_warning "您可以稍后选择菜单选项11来修复此问题"
+        fi
 
         echo ""
         echo -e "${GREEN}================================${NC}"
@@ -1048,20 +1277,10 @@ full_setup() {
         echo "- ✅ WebSocket支持"
         echo "- ✅ 自定义端口well-known配置"
         echo "- ✅ 防火墙规则自动配置"
-        echo "- ✅ ESS外部URL配置生成"
+        echo "- ✅ MAS ConfigMap端口问题修复"
         echo ""
-        echo -e "${YELLOW}重要提醒：${NC}"
-        echo "1. nginx反代配置已完成"
-        echo "2. ESS外部URL配置已生成但未应用"
-        echo "3. 需要应用ESS配置以修复MAS等服务的URL问题"
-        echo ""
-        read -p "是否现在应用ESS外部URL配置? [y/N]: " apply_now
-        if [[ "$apply_now" =~ ^[Yy]$ ]]; then
-            apply_ess_config
-        else
-            log_info "ESS外部URL配置已生成: $ESS_CONFIG_DIR/external-urls.yaml"
-            log_info "您可以稍后选择菜单选项来应用此配置"
-        fi
+        echo -e "${GREEN}配置完成！${NC}"
+        echo "如果MAS页面仍显示端口问题，请选择菜单选项11重新修复"
 
         echo ""
         echo "请确保DNS解析指向此服务器IP"
@@ -1080,6 +1299,19 @@ full_setup() {
     show_main_menu
 }
 
+# 仅修复MAS ConfigMap
+fix_mas_configmap_only() {
+    log_info "仅修复MAS ConfigMap端口问题..."
+
+    check_system_requirements
+    read_ess_config
+    configure_custom_ports
+    fix_mas_configmap
+
+    read -p "按任意键返回主菜单..."
+    show_main_menu
+}
+
 # 仅生成ESS配置
 generate_ess_config_only() {
     log_info "仅生成ESS外部URL配置..."
@@ -1091,7 +1323,7 @@ generate_ess_config_only() {
 
     log_success "ESS外部URL配置生成完成"
     log_info "配置文件位置: $ESS_CONFIG_DIR/external-urls.yaml"
-    log_info "请选择菜单选项12来应用此配置"
+    log_info "请选择菜单选项13来应用此配置"
 
     read -p "按任意键返回主菜单..."
     show_main_menu
