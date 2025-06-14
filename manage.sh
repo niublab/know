@@ -2834,14 +2834,14 @@ EOF
 
 # 安全加载配置（为用户管理功能提供默认值）
 load_config() {
-    # 设置默认值，防止变量未定义
-    SERVER_NAME=${SERVER_NAME:-"niub.win"}
-    ELEMENT_WEB_HOST=${ELEMENT_WEB_HOST:-"app.niub.win"}
-    MAS_HOST=${MAS_HOST:-"mas.niub.win"}
-    RTC_HOST=${RTC_HOST:-"rtc.niub.win"}
-    SYNAPSE_HOST=${SYNAPSE_HOST:-"matrix.niub.win"}
-    EXTERNAL_HTTP_PORT=${EXTERNAL_HTTP_PORT:-"8080"}
-    EXTERNAL_HTTPS_PORT=${EXTERNAL_HTTPS_PORT:-"8443"}
+    # 强制设置默认值，确保变量总是有值
+    SERVER_NAME="niub.win"
+    ELEMENT_WEB_HOST="app.niub.win"
+    MAS_HOST="mas.niub.win"
+    RTC_HOST="rtc.niub.win"
+    SYNAPSE_HOST="matrix.niub.win"
+    EXTERNAL_HTTP_PORT="8080"
+    EXTERNAL_HTTPS_PORT="8443"
 
     # 尝试从配置文件读取（如果存在）
     if [[ -f "$ESS_CONFIG_DIR/hostnames.yaml" ]]; then
@@ -2858,6 +2858,10 @@ load_config() {
         [[ -n "$rtc_host" ]] && RTC_HOST="$rtc_host"
         [[ -n "$synapse_host" ]] && SYNAPSE_HOST="$synapse_host"
     fi
+
+    # 导出变量，确保在所有子shell中可用
+    export SERVER_NAME ELEMENT_WEB_HOST MAS_HOST RTC_HOST SYNAPSE_HOST
+    export EXTERNAL_HTTP_PORT EXTERNAL_HTTPS_PORT
 }
 
 # 主程序入口
