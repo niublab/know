@@ -2152,14 +2152,13 @@ list_users() {
             echo "无法列出数据库，尝试其他用户名..."
         }
 
-        # 尝试多种可能的数据库配置（基于ESS实际部署）
+        # 基于实际ESS数据库配置（从kubectl describe获得的信息）
         local db_configs=(
             "postgres:matrixauthenticationservice"
-            "postgres:mas"
+            "matrixauthenticationservice_user:matrixauthenticationservice"
             "postgres:synapse"
-            "postgres:matrix"
-            "mas:matrixauthenticationservice"
-            "synapse:synapse"
+            "synapse_user:synapse"
+            "postgres:postgres"
         )
 
         local success=false
@@ -2174,12 +2173,16 @@ list_users() {
             if kubectl exec -n ess "$postgres_pod" -- psql -U "$db_user" -d "$db_name" -c "\\dt" 2>/dev/null; then
                 echo -e "${GREEN}连接成功！查看用户表...${NC}"
 
-                # 尝试查询用户表
+                # 基于实际表结构的查询（从\d users获得的信息）
                 local queries=(
-                    "SELECT username, display_name, email, created_at, locked_at IS NOT NULL as is_locked FROM users ORDER BY created_at LIMIT 20;"
-                    "SELECT username, email, created_at FROM users ORDER BY created_at LIMIT 20;"
-                    "SELECT id, username, email FROM users ORDER BY created_at LIMIT 20;"
-                    "SELECT * FROM users LIMIT 5;"
+                    # 完整用户信息查询（包含邮箱）
+                    "SELECT u.username, u.created_at, u.locked_at IS NOT NULL as is_locked, u.can_request_admin, u.is_guest, u.deactivated_at IS NOT NULL as is_deactivated, ue.email FROM users u LEFT JOIN user_emails ue ON u.primary_user_email_id = ue.user_email_id ORDER BY u.created_at LIMIT 20;"
+                    # 简化用户信息查询
+                    "SELECT username, created_at, locked_at IS NOT NULL as is_locked, can_request_admin, is_guest FROM users ORDER BY created_at LIMIT 20;"
+                    # 基本用户信息
+                    "SELECT username, created_at, locked_at, can_request_admin FROM users ORDER BY created_at LIMIT 20;"
+                    # 最简查询
+                    "SELECT username, created_at FROM users ORDER BY created_at LIMIT 20;"
                 )
 
                 for query in "${queries[@]}"; do
@@ -2201,17 +2204,37 @@ list_users() {
 
         if [[ "$success" == "false" ]]; then
             echo ""
-            log_warning "尝试了多种数据库配置，但都无法成功查询"
+            log_warning "尝试了多种数据库配置，但都无法成功查询用户表"
             echo ""
             echo -e "${YELLOW}调试信息：${NC}"
             echo "数据库Pod: $postgres_pod"
             echo ""
-            echo -e "${BLUE}手动调试步骤：${NC}"
-            echo "1. 进入数据库Pod: kubectl exec -it -n ess $postgres_pod -- bash"
-            echo "2. 查看数据库列表: psql -U postgres -l"
-            echo "3. 连接数据库: psql -U postgres -d <database_name>"
-            echo "4. 查看表: \\dt"
-            echo "5. 查看用户表: SELECT * FROM users;"
+            echo -e "${BLUE}可能的原因：${NC}"
+            echo "- users表可能不存在或名称不同"
+            echo "- 需要特定的数据库用户权限"
+            echo "- 表结构与预期不符"
+            echo ""
+            echo -e "${CYAN}手动调试步骤：${NC}"
+            echo "1. 连接MAS数据库:"
+            echo "   kubectl exec -it -n ess $postgres_pod -- psql -U postgres -d matrixauthenticationservice"
+            echo ""
+            echo "2. 查看所有表:"
+            echo "   \\dt"
+            echo ""
+            echo "3. 查找用户相关的表:"
+            echo "   \\dt *user*"
+            echo "   \\dt *account*"
+            echo ""
+            echo "4. 如果找到用户表，查看结构:"
+            echo "   \\d <table_name>"
+            echo ""
+            echo "5. 查看表内容:"
+            echo "   SELECT * FROM <table_name> LIMIT 5;"
+            echo ""
+            echo -e "${GREEN}已知的数据库信息：${NC}"
+            echo "- matrixauthenticationservice (MAS数据库)"
+            echo "- synapse (Synapse数据库)"
+            echo "- 用户: postgres, matrixauthenticationservice_user, synapse_user"
         fi
     else
         echo ""
