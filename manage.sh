@@ -691,6 +691,26 @@ server {
         add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS";
         add_header Access-Control-Allow-Headers "Origin, X-Requested-With, Content-Type, Accept, Authorization";
     }
+
+    # OpenID Connect 发现文档（MAS认证服务）
+    location /.well-known/openid-configuration {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-For \$remote_addr;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-Port \$server_port;
+        add_header Access-Control-Allow-Origin *;
+    }
+
+    # 其他 well-known 路径（通用处理）
+    location /.well-known/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-For \$remote_addr;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-Port \$server_port;
+        add_header Access-Control-Allow-Origin *;
+    }
 }
 EOF
 

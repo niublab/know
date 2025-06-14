@@ -472,4 +472,34 @@ server {
 优先级：最高
 状态：已获得官方完整配置，可以实施
 
+问题15：OpenID Connect发现文档端口问题（关键遗漏）
+--------------------------------------------
+用户发现的具体问题：
+MAS页面显示的OpenID Connect发现文档链接：
+https://mas.niub.win/.well-known/openid-configuration
+
+但实际外部访问需要自定义端口：
+https://mas.niub.win:9443/.well-known/openid-configuration
+
+当前nginx配置遗漏：
+- ❌ 没有处理 /.well-known/openid-configuration 路径
+- ❌ 没有处理其他 /.well-known/ 路径
+
+更深层问题：
+即使nginx正确代理，MAS内部生成的OpenID配置文档中的URL
+可能仍然不包含自定义端口，需要进一步验证。
+
+已添加的nginx配置：
+- ✅ /.well-known/openid-configuration 专门处理
+- ✅ /.well-known/ 通用路径处理
+- ✅ 正确的代理头设置（包含X-Forwarded-Port）
+
+需要验证：
+1. nginx配置是否解决了访问问题
+2. MAS生成的OpenID配置内容是否正确
+3. 是否需要额外的MAS配置
+
+优先级：最高（影响认证功能）
+状态：已添加nginx配置，需要测试验证
+
 ==============================================
