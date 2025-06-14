@@ -410,14 +410,8 @@ synapse:
 # wellKnownDelegation 使用 serverName 自动配置，不需要单独的 ingress.host
 EOF
 
-    # 创建 TLS 配置文件
-    cat > "$CONFIG_DIR/tls.yaml" <<EOF
-# Copyright 2025 New Vector Ltd
-# SPDX-License-Identifier: AGPL-3.0-only
-
-certManager:
-  clusterIssuer: letsencrypt-prod
-EOF
+    # TLS 配置文件由 configure_cloudflare_dns() 函数创建
+    # 这里不再重复创建，避免覆盖用户选择的证书环境
 
     log_success "基础配置文件创建完成"
 }
@@ -428,7 +422,12 @@ deploy_ess() {
 
     # 检查配置文件
     if [[ ! -f "$CONFIG_DIR/hostnames.yaml" ]]; then
-        log_error "配置文件不存在，请先创建配置"
+        log_error "域名配置文件不存在，请先运行 '配置 ESS 部署' 选项"
+        return 1
+    fi
+
+    if [[ ! -f "$CONFIG_DIR/tls.yaml" ]]; then
+        log_error "TLS配置文件不存在，请先运行 '配置 ESS 部署' 选项"
         return 1
     fi
 
