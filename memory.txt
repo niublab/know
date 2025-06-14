@@ -881,4 +881,61 @@ kubectl exec -n ess "$postgres_pod" -- psql -U postgres -d matrixauthentications
 4. 🔧 基于实际反馈调整实现方案
 5. ⚠️ 不要假想命令或参数的存在
 
+🔧 变量作用域和set -u模式的关键问题
+----------------------------------------
+问题发现：用户报告"MAS_HOST: unbound variable"错误
+
+根本原因分析：
+1. set -euo pipefail中的-u选项导致使用未定义变量时脚本立即退出
+2. ${VAR:-default}语法在set -u模式下不够可靠
+3. 变量可能在子shell或函数作用域中丢失
+4. read命令失败可能导致变量未定义
+
+错误的解决方案：
+❌ 使用${VAR:-default}语法（在set -u下不可靠）
+❌ 只在函数内部设置变量（作用域问题）
+❌ 依赖read命令的成功执行（可能被中断）
+
+正确的解决方案：
+✅ 强制设置默认值：VAR="default_value"
+✅ 导出全局变量：export VAR
+✅ 为所有read命令添加失败处理：read -p "..." var || var=""
+✅ 在主程序开始时加载配置
+
+实际修复代码模式：
+```bash
+# 1. 安全的配置加载函数
+load_config() {
+    # 强制设置默认值（不使用${VAR:-default}）
+    MAS_HOST="mas.niub.win"
+    EXTERNAL_HTTPS_PORT="8443"
+
+    # 尝试读取实际配置（安全方式）
+    if [[ -f "$config_file" ]]; then
+        local mas_host=$(grep "..." 2>/dev/null || echo "")
+        [[ -n "$mas_host" ]] && MAS_HOST="$mas_host"
+    fi
+
+    # 导出变量确保全局可用
+    export MAS_HOST EXTERNAL_HTTPS_PORT
+}
+
+# 2. 安全的read命令模式
+read -p "请输入: " variable || variable=""
+
+# 3. 主程序中预加载配置
+main() {
+    load_config  # 确保所有函数都能使用配置变量
+    show_main_menu
+}
+```
+
+关键经验：
+⚠️ 在set -u模式下，变量安全性比代码简洁性更重要
+⚠️ 所有可能失败的变量赋值都需要默认值处理
+⚠️ 配置变量应该在程序开始时就全局设置并导出
+⚠️ 不要假设${VAR:-default}在所有情况下都有效
+
+这个问题的解决为脚本提供了企业级的稳定性。
+
 ==============================================
