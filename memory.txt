@@ -587,7 +587,33 @@ https://mas.niub.win:9443/.well-known/openid-configuration
 - 验证所有URL包含正确端口信息
 
 优先级：最高
-状态：需要系统性修复所有配置问题
+状态：✅ 主要问题已解决！
+
+解决方案实施：
+✅ 问题根因确认：ESS的well-known服务通过HAProxy返回静态配置
+✅ 修复方法：直接修改ESS ConfigMap而非nginx配置
+
+具体修复过程：
+1. 发现nginx配置被绕过，请求直接到达ESS后端
+2. 找到ESS的ess-well-known-haproxy ConfigMap
+3. 修复server配置："matrix.niub.win:443" → "matrix.niub.win:8443"
+4. 修复client配置：所有URL添加端口8443
+5. 重启ess-haproxy deployment应用配置
+
+修复结果验证：
+✅ well-known服务器配置：返回正确的8443端口
+✅ well-known客户端配置：所有URL包含8443端口
+✅ MAS认证服务URL：包含正确端口
+✅ RTC服务URL：包含正确端口
+
+技术要点：
+- 问题根源：ESS内部HAProxy静态配置，不是nginx问题
+- 修复方法：kubectl patch configmap + rollout restart
+- 关键发现：Traefik ingress直接路由到ESS well-known服务
+
+剩余问题：
+4. 主域名重定向问题：当前重定向到app.niub.win（缺少端口）
+6. 旧配置文件清理：低优先级
 
 问题18：MAS外部URL配置问题（基于实际配置发现）
 ------------------------------------------
@@ -646,5 +672,41 @@ matrixAuthenticationService:
 - issuer正确: "issuer":"https://mas.niub.win:8443/"
 - 所有端点包含端口: authorize, token, keys.json, account等
 - 从根源解决URL生成问题，性能最优
+
+==============================================
+
+🎯 关键洞察：ESS自定义端口问题的根本原因
+----------------------------------------
+重要发现：所有端口相关问题都是同一个根本原因的不同表现
+
+根本原因：
+ESS内部服务的配置都硬编码了标准端口，没有考虑自定义端口场景：
+- MAS ConfigMap: public_base缺少端口
+- well-known ConfigMap: server/client配置使用443端口
+- 可能还有其他服务的类似问题
+
+统一解决思路：
+1. 不是nginx配置问题 - nginx配置被ESS内部服务绕过
+2. 需要修改ESS内部ConfigMap - 直接修改相关配置
+3. 重启对应服务 - 让新配置生效
+4. 验证修复效果 - 确保URL包含正确端口
+
+标准化修复流程：
+1. 识别负责生成URL的ESS ConfigMap
+2. 修改其中的端口配置（443→8443）
+3. 重启相关deployment
+4. 验证所有URL包含正确端口
+
+已验证的修复案例：
+✅ MAS ConfigMap修复：fix_mas_configmap()
+✅ well-known ConfigMap修复：手动验证成功
+
+需要标准化的脚本功能：
+- 统一的ESS ConfigMap端口修复函数
+- 自动检测所有需要修复的ConfigMap
+- 批量修复所有端口配置问题
+- 完整的备份和验证机制
+
+这个洞察为解决所有ESS自定义端口问题提供了统一的方法论。
 
 ==============================================

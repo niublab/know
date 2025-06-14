@@ -265,19 +265,21 @@ show_main_menu() {
     echo "10) 查看用户列表"
     echo ""
     echo -e "${GREEN}=== ESS配置管理 ===${NC}"
-    echo "11) 修复MAS ConfigMap端口问题 (推荐)"
-    echo "12) 生成ESS外部URL配置"
-    echo "13) 应用ESS外部URL配置"
+    echo "11) 修复所有ESS端口配置问题 (推荐)"
+    echo "12) 修复MAS ConfigMap端口问题"
+    echo "13) 修复well-known ConfigMap端口问题"
+    echo "14) 生成ESS外部URL配置"
+    echo "15) 应用ESS外部URL配置"
     echo ""
     echo -e "${GREEN}=== 系统管理 ===${NC}"
-    echo "14) 查看系统状态"
-    echo "15) 查看服务日志"
-    echo "16) 重启服务"
-    echo "17) 备份配置"
+    echo "16) 查看系统状态"
+    echo "17) 查看服务日志"
+    echo "18) 重启服务"
+    echo "19) 备份配置"
     echo ""
     echo "0) 退出"
     echo ""
-    read -p "请输入选择 [0-17]: " choice
+    read -p "请输入选择 [0-19]: " choice
 
     case $choice in
         1) full_setup ;;
@@ -290,13 +292,15 @@ show_main_menu() {
         8) modify_user_permissions ;;
         9) generate_registration_link ;;
         10) list_users ;;
-        11) fix_mas_configmap_only ;;
-        12) generate_ess_config_only ;;
-        13) apply_ess_config_only ;;
-        14) show_status ;;
-        15) show_logs ;;
-        16) restart_services ;;
-        17) backup_config ;;
+        11) fix_all_ess_ports_only ;;
+        12) fix_mas_configmap_only ;;
+        13) fix_wellknown_configmap_only ;;
+        14) generate_ess_config_only ;;
+        15) apply_ess_config_only ;;
+        16) show_status ;;
+        17) show_logs ;;
+        18) restart_services ;;
+        19) backup_config ;;
         0) exit 0 ;;
         *)
             log_error "无效选择"
@@ -1009,6 +1013,300 @@ get_ess_chart_info() {
     return 1
 }
 
+# 修复ESS well-known ConfigMap中的端口问题
+fix_ess_wellknown_configmap() {
+    log_info "修复ESS well-known ConfigMap中的端口问题..."
+
+    # 检查当前well-known server配置
+    local current_server=$(kubectl get configmap ess-well-known-haproxy -n ess -o jsonpath='{.data.server}' 2>/dev/null | grep -o 'matrix.niub.win:[0-9]*' || echo "")
+
+    if [[ -z "$current_server" ]]; then
+        log_error "无法获取ESS well-known ConfigMap中的server配置"
+        return 1
+    fi
+
+    log_info "当前well-known server配置: $current_server"
+
+    # 检查是否需要修复
+    local expected_server="matrix.niub.win:$EXTERNAL_HTTPS_PORT"
+
+    if [[ "$current_server" == "$expected_server" ]]; then
+        log_success "ESS well-known ConfigMap配置已正确，无需修复"
+        return 0
+    fi
+
+    log_warning "需要修复ESS well-known ConfigMap配置"
+    log_info "当前值: $current_server"
+    log_info "期望值: $expected_server"
+
+    read -p "确认修复ESS well-known ConfigMap? [y/N]: " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        log_info "操作已取消"
+        return 0
+    fi
+
+    # 备份当前ConfigMap
+    local backup_file="$ESS_CONFIG_DIR/well-known-configmap-backup-$(date +%Y%m%d-%H%M%S).yaml"
+    if kubectl get configmap ess-well-known-haproxy -n ess -o yaml > "$backup_file" 2>/dev/null; then
+        log_success "ConfigMap备份完成: $backup_file"
+    else
+        log_warning "ConfigMap备份失败"
+    fi
+
+    # 修复server配置
+    log_info "正在修复well-known server配置..."
+    local server_config="{\"m.server\": \"$expected_server\"}"
+
+    if kubectl patch configmap ess-well-known-haproxy -n ess --type merge -p "{\"data\":{\"server\":\"$server_config\"}}"; then
+        log_success "well-known server配置修复成功"
+    else
+        log_error "well-known server配置修复失败"
+        return 1
+    fi
+
+    # 修复client配置
+    log_info "正在修复well-known client配置..."
+    local client_config="{
+  \"m.homeserver\": {
+    \"base_url\": \"https://matrix.niub.win:$EXTERNAL_HTTPS_PORT\"
+  },
+  \"org.matrix.msc2965.authentication\": {
+    \"account\": \"https://mas.niub.win:$EXTERNAL_HTTPS_PORT/account\",
+    \"issuer\": \"https://mas.niub.win:$EXTERNAL_HTTPS_PORT/\"
+  },
+  \"org.matrix.msc4143.rtc_foci\": [
+    {
+      \"livekit_service_url\": \"https://rtc.niub.win:$EXTERNAL_HTTPS_PORT\",
+      \"type\": \"livekit\"
+    }
+  ]
+}"
+
+    if kubectl patch configmap ess-well-known-haproxy -n ess --type merge -p "{\"data\":{\"client\":\"$client_config\"}}"; then
+        log_success "well-known client配置修复成功"
+    else
+        log_error "well-known client配置修复失败"
+        return 1
+    fi
+
+    # 重启HAProxy服务
+    log_info "重启HAProxy服务以应用新配置..."
+    if kubectl rollout restart deployment ess-haproxy -n ess; then
+        log_success "HAProxy服务重启命令已执行"
+
+        # 等待重启完成
+        log_info "等待HAProxy服务重启完成..."
+        if kubectl rollout status deployment ess-haproxy -n ess --timeout=300s; then
+            log_success "HAProxy服务重启完成"
+        else
+            log_warning "HAProxy服务重启超时，请手动检查状态"
+        fi
+    else
+        log_error "HAProxy服务重启失败"
+        return 1
+    fi
+
+    # 验证修复效果
+    log_info "验证修复效果..."
+    sleep 10
+
+    # 测试server配置
+    local new_server=$(curl -k -s "https://niub.win:$EXTERNAL_HTTPS_PORT/.well-known/matrix/server" | grep -o 'matrix.niub.win:[0-9]*' || echo "")
+    if [[ "$new_server" == "$expected_server" ]]; then
+        log_success "well-known server配置验证成功: $new_server"
+    else
+        log_warning "well-known server配置验证失败，当前值: $new_server"
+    fi
+
+    # 测试client配置
+    local client_test=$(curl -k -s "https://niub.win:$EXTERNAL_HTTPS_PORT/.well-known/matrix/client" | grep -o "matrix.niub.win:$EXTERNAL_HTTPS_PORT" | head -1)
+    if [[ -n "$client_test" ]]; then
+        log_success "well-known client配置验证成功，包含正确端口"
+    else
+        log_warning "well-known client配置可能需要更多时间生效"
+    fi
+
+    log_success "ESS well-known端口问题修复完成！"
+    log_info "备份文件: $backup_file"
+}
+
+# 修复ESS well-known ConfigMap中的端口问题
+fix_ess_wellknown_configmap() {
+    log_info "修复ESS well-known ConfigMap中的端口问题..."
+
+    # 检查当前well-known server配置
+    local current_server=$(kubectl get configmap ess-well-known-haproxy -n ess -o jsonpath='{.data.server}' 2>/dev/null | grep -o 'matrix.niub.win:[0-9]*' || echo "")
+
+    if [[ -z "$current_server" ]]; then
+        log_error "无法获取ESS well-known ConfigMap中的server配置"
+        return 1
+    fi
+
+    log_info "当前well-known server配置: $current_server"
+
+    # 检查是否需要修复
+    local expected_server="matrix.niub.win:$EXTERNAL_HTTPS_PORT"
+
+    if [[ "$current_server" == "$expected_server" ]]; then
+        log_success "ESS well-known ConfigMap配置已正确，无需修复"
+        return 0
+    fi
+
+    log_warning "需要修复ESS well-known ConfigMap配置"
+    log_info "当前值: $current_server"
+    log_info "期望值: $expected_server"
+
+    read -p "确认修复ESS well-known ConfigMap? [y/N]: " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        log_info "操作已取消"
+        return 0
+    fi
+
+    # 备份当前ConfigMap
+    local backup_file="$ESS_CONFIG_DIR/well-known-configmap-backup-$(date +%Y%m%d-%H%M%S).yaml"
+    if kubectl get configmap ess-well-known-haproxy -n ess -o yaml > "$backup_file" 2>/dev/null; then
+        log_success "ConfigMap备份完成: $backup_file"
+    else
+        log_warning "ConfigMap备份失败"
+    fi
+
+    # 修复server配置
+    log_info "正在修复well-known server配置..."
+    local server_config="{\"m.server\": \"$expected_server\"}"
+
+    if kubectl patch configmap ess-well-known-haproxy -n ess --type merge -p "{\"data\":{\"server\":\"$server_config\"}}"; then
+        log_success "well-known server配置修复成功"
+    else
+        log_error "well-known server配置修复失败"
+        return 1
+    fi
+
+    # 修复client配置
+    log_info "正在修复well-known client配置..."
+    local client_config="{
+  \"m.homeserver\": {
+    \"base_url\": \"https://matrix.niub.win:$EXTERNAL_HTTPS_PORT\"
+  },
+  \"org.matrix.msc2965.authentication\": {
+    \"account\": \"https://mas.niub.win:$EXTERNAL_HTTPS_PORT/account\",
+    \"issuer\": \"https://mas.niub.win:$EXTERNAL_HTTPS_PORT/\"
+  },
+  \"org.matrix.msc4143.rtc_foci\": [
+    {
+      \"livekit_service_url\": \"https://rtc.niub.win:$EXTERNAL_HTTPS_PORT\",
+      \"type\": \"livekit\"
+    }
+  ]
+}"
+
+    if kubectl patch configmap ess-well-known-haproxy -n ess --type merge -p "{\"data\":{\"client\":\"$client_config\"}}"; then
+        log_success "well-known client配置修复成功"
+    else
+        log_error "well-known client配置修复失败"
+        return 1
+    fi
+
+    # 重启HAProxy服务
+    log_info "重启HAProxy服务以应用新配置..."
+    if kubectl rollout restart deployment ess-haproxy -n ess; then
+        log_success "HAProxy服务重启命令已执行"
+
+        # 等待重启完成
+        log_info "等待HAProxy服务重启完成..."
+        if kubectl rollout status deployment ess-haproxy -n ess --timeout=300s; then
+            log_success "HAProxy服务重启完成"
+        else
+            log_warning "HAProxy服务重启超时，请手动检查状态"
+        fi
+    else
+        log_error "HAProxy服务重启失败"
+        return 1
+    fi
+
+    # 验证修复效果
+    log_info "验证修复效果..."
+    sleep 10
+
+    # 测试server配置
+    local new_server=$(curl -k -s "https://niub.win:$EXTERNAL_HTTPS_PORT/.well-known/matrix/server" | grep -o 'matrix.niub.win:[0-9]*' || echo "")
+    if [[ "$new_server" == "$expected_server" ]]; then
+        log_success "well-known server配置验证成功: $new_server"
+    else
+        log_warning "well-known server配置验证失败，当前值: $new_server"
+    fi
+
+    # 测试client配置
+    local client_test=$(curl -k -s "https://niub.win:$EXTERNAL_HTTPS_PORT/.well-known/matrix/client" | grep -o "matrix.niub.win:$EXTERNAL_HTTPS_PORT" | head -1)
+    if [[ -n "$client_test" ]]; then
+        log_success "well-known client配置验证成功，包含正确端口"
+    else
+        log_warning "well-known client配置可能需要更多时间生效"
+    fi
+
+    log_success "ESS well-known端口问题修复完成！"
+    log_info "备份文件: $backup_file"
+}
+
+# 统一修复所有ESS端口配置问题
+fix_all_ess_ports() {
+    log_info "统一修复所有ESS端口配置问题..."
+
+    echo ""
+    echo -e "${GREEN}=== ESS端口配置统一修复 ===${NC}"
+    echo "基于关键洞察：所有端口问题都是ESS内部ConfigMap硬编码标准端口导致"
+    echo ""
+    echo "将要修复的问题："
+    echo "1. MAS ConfigMap - public_base端口问题"
+    echo "2. well-known ConfigMap - server/client端口问题"
+    echo ""
+
+    read -p "确认开始统一修复? [y/N]: " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        log_info "操作已取消"
+        return 0
+    fi
+
+    local success_count=0
+    local total_count=2
+
+    # 修复MAS ConfigMap
+    echo ""
+    echo -e "${YELLOW}=== 1/2 修复MAS ConfigMap ===${NC}"
+    if fix_mas_configmap; then
+        ((success_count++))
+        log_success "MAS ConfigMap修复成功"
+    else
+        log_error "MAS ConfigMap修复失败"
+    fi
+
+    # 修复well-known ConfigMap
+    echo ""
+    echo -e "${YELLOW}=== 2/2 修复well-known ConfigMap ===${NC}"
+    if fix_ess_wellknown_configmap; then
+        ((success_count++))
+        log_success "well-known ConfigMap修复成功"
+    else
+        log_error "well-known ConfigMap修复失败"
+    fi
+
+    # 总结修复结果
+    echo ""
+    echo -e "${GREEN}=== 修复结果总结 ===${NC}"
+    echo "成功修复: $success_count/$total_count"
+
+    if [[ $success_count -eq $total_count ]]; then
+        log_success "所有ESS端口配置问题修复完成！"
+        echo ""
+        echo "修复效果："
+        echo "✅ MAS服务：所有URL包含端口$EXTERNAL_HTTPS_PORT"
+        echo "✅ well-known服务：server/client配置包含正确端口"
+        echo "✅ 认证流程：应该能正常工作"
+        echo "✅ 客户端发现：应该能正确连接"
+    else
+        log_warning "部分修复失败，请检查错误信息并手动修复"
+    fi
+}
+
 # 修复MAS ConfigMap中的端口问题（方案3：直接修改ConfigMap）
 fix_mas_configmap() {
     log_info "修复MAS ConfigMap中的端口问题..."
@@ -1247,16 +1545,17 @@ full_setup() {
         # 配置防火墙
         configure_firewall
 
-        # 修复MAS ConfigMap端口问题（推荐方案）
+        # 统一修复所有ESS端口配置问题（基于关键洞察）
         echo ""
-        echo -e "${YELLOW}重要：修复MAS等服务的URL端口问题${NC}"
-        echo "检测到需要修复ESS服务的外部URL配置"
+        echo -e "${YELLOW}重要：统一修复所有ESS服务的URL端口问题${NC}"
+        echo "基于关键洞察：所有端口问题都是ESS内部ConfigMap硬编码标准端口导致"
+        echo "将修复：MAS ConfigMap + well-known ConfigMap"
         echo ""
-        read -p "是否现在修复MAS ConfigMap端口问题? [Y/n]: " fix_mas_now
-        if [[ ! "$fix_mas_now" =~ ^[Nn]$ ]]; then
-            fix_mas_configmap
+        read -p "是否现在统一修复所有ESS端口配置问题? [Y/n]: " fix_all_now
+        if [[ ! "$fix_all_now" =~ ^[Nn]$ ]]; then
+            fix_all_ess_ports
         else
-            log_info "跳过MAS ConfigMap修复"
+            log_info "跳过ESS端口配置修复"
             log_warning "您可以稍后选择菜单选项11来修复此问题"
         fi
 
@@ -1299,6 +1598,19 @@ full_setup() {
     show_main_menu
 }
 
+# 仅修复所有ESS端口配置问题
+fix_all_ess_ports_only() {
+    log_info "统一修复所有ESS端口配置问题..."
+
+    check_system_requirements
+    read_ess_config
+    configure_custom_ports
+    fix_all_ess_ports
+
+    read -p "按任意键返回主菜单..."
+    show_main_menu
+}
+
 # 仅修复MAS ConfigMap
 fix_mas_configmap_only() {
     log_info "仅修复MAS ConfigMap端口问题..."
@@ -1307,6 +1619,19 @@ fix_mas_configmap_only() {
     read_ess_config
     configure_custom_ports
     fix_mas_configmap
+
+    read -p "按任意键返回主菜单..."
+    show_main_menu
+}
+
+# 仅修复well-known ConfigMap
+fix_wellknown_configmap_only() {
+    log_info "仅修复well-known ConfigMap端口问题..."
+
+    check_system_requirements
+    read_ess_config
+    configure_custom_ports
+    fix_ess_wellknown_configmap
 
     read -p "按任意键返回主菜单..."
     show_main_menu
