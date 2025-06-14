@@ -763,4 +763,122 @@ Element Web问题验证：
 ✅ 注册token生成功能已正确实现
 ✅ 用户权限管理功能已基于实际可用命令重新设计
 
+🔍 通过实际命令查询发现的关键问题和解决方法
+----------------------------------------
+
+问题1：MAS容器环境特殊性
+发现过程：
+- 执行kubectl exec遇到错误："exec: "sh": executable file not found in $PATH"
+- 进一步测试发现："exec: "ls": executable file not found in $PATH"
+
+关键发现：
+❌ MAS容器是精简容器，没有标准shell工具（sh、ls、bash等）
+✅ 只能直接执行mas-cli命令，不能使用shell包装
+
+解决方法：
+- 错误方式：kubectl exec -- sh -c "mas-cli ..."
+- 正确方式：kubectl exec -- mas-cli [args...]
+- 使用数组传递参数：kubectl exec -- mas-cli "${cmd_args[@]}"
+
+问题2：MAS CLI命令的实际可用性验证
+发现过程：
+- 通过kubectl exec -- mas-cli --help查看实际可用命令
+- 通过kubectl exec -- mas-cli manage --help查看子命令
+
+关键发现：
+❌ 脚本中假想的命令（如generate-registration-token）不存在
+✅ 实际命令：issue-user-registration-token
+❌ 假想的set-admin/unset-admin命令不存在
+✅ 实际可用：lock-user/unlock-user/set-password/add-email等
+
+实际可用的manage子命令（经验证）：
+- add-email: 添加邮箱地址
+- set-password: 设置用户密码
+- issue-compatibility-token: 发放兼容性token
+- provision-all-users: 触发所有用户的provisioning
+- kill-sessions: 终止用户所有会话
+- lock-user: 锁定用户
+- unlock-user: 解锁用户
+- register-user: 注册用户
+- issue-user-registration-token: 生成注册token（官方文档确认）
+
+问题3：register-user命令的正确参数格式
+发现过程：
+- 通过kubectl exec -- mas-cli manage register-user --help查看实际参数
+
+关键发现：
+✅ 用户名作为位置参数：register-user [USERNAME]
+✅ 支持的参数：
+  - --password <PASSWORD>
+  - --email <EMAILS> (可多次使用)
+  - --admin / --no-admin
+  - --display-name <DISPLAY_NAME>
+  - --yes (跳过交互确认)
+  - --ignore-password-complexity
+
+正确的命令构建方式：
+```bash
+local cmd_args=("manage" "register-user")
+cmd_args+=("$username")  # 用户名作为位置参数
+cmd_args+=("--password" "$password")
+cmd_args+=("--email" "$email")
+cmd_args+=("--yes")
+if [[ "$is_admin" == "y" ]]; then
+    cmd_args+=("--admin")
+fi
+kubectl exec -n ess "$mas_pod" -- mas-cli "${cmd_args[@]}"
+```
+
+问题4：ESS well-known配置的真实来源
+发现过程：
+- nginx配置看起来正确但不生效
+- 通过curl测试发现请求被后端处理
+- 检查kubectl get ingress发现Traefik直接路由到ESS
+
+关键发现：
+❌ nginx的well-known配置被绕过
+✅ ESS内部有专门的well-known服务（ess-well-known）
+✅ 配置存储在ess-well-known-haproxy ConfigMap中
+✅ 使用HAProxy返回静态JSON文件
+
+解决方法：
+- 不修改nginx配置，直接修改ESS的ConfigMap
+- 修改ess-well-known-haproxy ConfigMap中的server和client配置
+- 重启ess-haproxy deployment应用配置
+
+问题5：Element Web连接问题的根本原因
+发现过程：
+- 用户报告Element Web显示"Can't connect to homeserver"
+- 检查Element Web ConfigMap发现base_url缺少端口
+
+关键发现：
+❌ Element Web ConfigMap: "base_url": "https://matrix.niub.win"
+✅ 应该是: "base_url": "https://matrix.niub.win:8443"
+
+解决方法：
+- 修改ess-element-web ConfigMap中的config.json
+- 更新default_server_config.m.homeserver.base_url
+- 重启ess-element-web deployment
+
+问题6：数据库查询用户列表的实际方法
+发现过程：
+- MAS CLI没有list-users命令
+- 尝试通过PostgreSQL数据库直接查询
+
+实际可用方法：
+```bash
+# 获取PostgreSQL Pod
+postgres_pod=$(kubectl get pods -n ess -l app.kubernetes.io/name=postgres -o jsonpath='{.items[0].metadata.name}')
+
+# 查询用户表
+kubectl exec -n ess "$postgres_pod" -- psql -U postgres -d matrixauthenticationservice -c "SELECT username, display_name, email, created_at, locked_at IS NOT NULL as is_locked FROM users ORDER BY created_at;"
+```
+
+重要经验总结：
+1. 🔍 始终通过实际命令验证功能可用性
+2. 📚 优先查阅官方最新文档
+3. 🧪 在容器环境中测试命令执行
+4. 🔧 基于实际反馈调整实现方案
+5. ⚠️ 不要假想命令或参数的存在
+
 ==============================================
