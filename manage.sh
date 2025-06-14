@@ -650,6 +650,36 @@ server {
     # 安全头（官方推荐）
     add_header Strict-Transport-Security 'max-age=31536000; includeSubDomains; preload' always;
 
+    # 主域名根路径特殊处理（修复ESS重定向端口丢失问题）
+    location = / {
+        # 如果是主域名，重定向到Element Web并保持端口
+        if (\$host = "$SERVER_NAME") {
+            return 301 https://$ELEMENT_WEB_HOST:$EXTERNAL_HTTPS_PORT/;
+        }
+
+        # 其他域名正常代理
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header X-Forwarded-For \$remote_addr;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-Port \$server_port;
+
+        # WebSocket支持
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        # 超时配置
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+
+        # 禁用缓冲
+        proxy_buffering off;
+
+        # 文件上传限制
+        client_max_body_size 50M;
+    }
+
     # 主要反代配置
     location / {
         # 反代到Traefik HTTP端口（官方推荐8080）
@@ -659,6 +689,7 @@ server {
         proxy_set_header X-Forwarded-For \$remote_addr;
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-Port \$server_port;
 
         # 文件上传限制（官方推荐50M）
         client_max_body_size 50M;
@@ -676,17 +707,21 @@ server {
         proxy_buffering off;
     }
 
-    # 自定义端口的well-known服务器配置
+    # 自定义端口的well-known服务器配置（修复端口问题）
     location /.well-known/matrix/server {
         return 200 '{\"m.server\": \"$SYNAPSE_HOST:$EXTERNAL_HTTPS_PORT\"}';
         add_header Content-Type application/json;
         add_header Access-Control-Allow-Origin *;
+        add_header Cache-Control "public, max-age=3600";
     }
 
     # 客户端配置发现（保持ESS原始配置）
     location /.well-known/matrix/client {
         proxy_pass http://127.0.0.1:8080;
         proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-For \$remote_addr;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-Port \$server_port;
         add_header Access-Control-Allow-Origin *;
         add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS";
         add_header Access-Control-Allow-Headers "Origin, X-Requested-With, Content-Type, Accept, Authorization";
