@@ -169,7 +169,7 @@ configure_custom_ports() {
     
     # HTTP端口配置
     while true; do
-        read -p "请输入HTTP端口 [默认: 8080]: " EXTERNAL_HTTP_PORT
+        read -p "请输入HTTP端口 [默认: 8080]: " EXTERNAL_HTTP_PORT || EXTERNAL_HTTP_PORT=""
         EXTERNAL_HTTP_PORT=${EXTERNAL_HTTP_PORT:-8080}
         
         if [[ "$EXTERNAL_HTTP_PORT" =~ ^[0-9]+$ ]] && [[ "$EXTERNAL_HTTP_PORT" -ge 1024 ]] && [[ "$EXTERNAL_HTTP_PORT" -le 65535 ]]; then
@@ -181,7 +181,7 @@ configure_custom_ports() {
     
     # HTTPS端口配置
     while true; do
-        read -p "请输入HTTPS端口 [默认: 8443]: " EXTERNAL_HTTPS_PORT
+        read -p "请输入HTTPS端口 [默认: 8443]: " EXTERNAL_HTTPS_PORT || EXTERNAL_HTTPS_PORT=""
         EXTERNAL_HTTPS_PORT=${EXTERNAL_HTTPS_PORT:-8443}
         
         if [[ "$EXTERNAL_HTTPS_PORT" =~ ^[0-9]+$ ]] && [[ "$EXTERNAL_HTTPS_PORT" -ge 1024 ]] && [[ "$EXTERNAL_HTTPS_PORT" -le 65535 ]] && [[ "$EXTERNAL_HTTPS_PORT" != "$EXTERNAL_HTTP_PORT" ]]; then
@@ -267,7 +267,7 @@ show_main_menu() {
     echo ""
     echo "0) 退出"
     echo ""
-    read -p "请输入选择 [0-9]: " choice
+    read -p "请输入选择 [0-9]: " choice || choice=""
 
     case $choice in
         1) full_setup ;;
@@ -410,11 +410,12 @@ create_user() {
 
     echo ""
     echo "请输入用户信息:"
-    read -p "用户名: " username
-    read -p "显示名称: " display_name
-    read -s -p "密码: " password
+    read -p "用户名: " username || username=""
+    read -p "显示名称: " display_name || display_name=""
+    read -s -p "密码: " password || password=""
     echo ""
-    read -p "邮箱 (可选): " email
+    read -p "邮箱 (可选): " email || email=""
+    read -p "是否设为管理员? [y/N]: " is_admin || is_admin=""
 
     # 验证输入
     if [[ -z "$username" || -z "$password" ]]; then
@@ -508,7 +509,7 @@ delete_user() {
     log_info "删除用户..."
 
     echo ""
-    read -p "请输入要删除的用户名: " username
+    read -p "请输入要删除的用户名: " username || username=""
 
     if [[ -z "$username" ]]; then
         log_error "用户名不能为空"
@@ -520,7 +521,7 @@ delete_user() {
     # 确认删除
     echo ""
     log_warning "警告: 此操作将永久删除用户 '$username' 及其所有数据"
-    read -p "确认删除? [y/N]: " confirm
+    read -p "确认删除? [y/N]: " confirm || confirm=""
 
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
         log_info "操作已取消"
@@ -554,7 +555,7 @@ modify_user_permissions() {
     log_info "修改用户权限..."
 
     echo ""
-    read -p "请输入用户名: " username
+    read -p "请输入用户名: " username || username=""
 
     if [[ -z "$username" ]]; then
         log_error "用户名不能为空"
@@ -573,7 +574,7 @@ modify_user_permissions() {
     echo "6) 发放兼容性token"
     echo "0) 返回"
     echo ""
-    read -p "请选择 [0-6]: " perm_choice
+    read -p "请选择 [0-6]: " perm_choice || perm_choice=""
 
     local mas_pod=$(kubectl get pods -n ess -l app.kubernetes.io/name=matrix-authentication-service -o jsonpath='{.items[0].metadata.name}')
 
@@ -588,7 +589,7 @@ modify_user_permissions() {
         1)
             # 锁定用户（基于官方文档）
             echo ""
-            read -p "是否同时停用用户? [y/N]: " deactivate
+            read -p "是否同时停用用户? [y/N]: " deactivate || deactivate=""
 
             local cmd_args=("manage" "lock-user" "$username")
             if [[ "$deactivate" =~ ^[Yy]$ ]]; then
@@ -625,9 +626,9 @@ modify_user_permissions() {
         3)
             # 设置密码
             echo ""
-            read -s -p "请输入新密码: " new_password
+            read -s -p "请输入新密码: " new_password || new_password=""
             echo ""
-            read -s -p "确认新密码: " confirm_password
+            read -s -p "确认新密码: " confirm_password || confirm_password=""
             echo ""
 
             if [[ "$new_password" != "$confirm_password" ]]; then
@@ -635,7 +636,7 @@ modify_user_permissions() {
                 return 1
             fi
 
-            read -p "是否忽略密码复杂度检查? [y/N]: " ignore_complexity
+            read -p "是否忽略密码复杂度检查? [y/N]: " ignore_complexity || ignore_complexity=""
 
             local cmd_args=("manage" "set-password" "$username" "$new_password")
             if [[ "$ignore_complexity" =~ ^[Yy]$ ]]; then
@@ -656,7 +657,7 @@ modify_user_permissions() {
         4)
             # 添加邮箱
             echo ""
-            read -p "请输入要添加的邮箱地址: " email
+            read -p "请输入要添加的邮箱地址: " email || email=""
 
             if [[ -z "$email" ]]; then
                 log_error "邮箱地址不能为空"
@@ -679,7 +680,7 @@ modify_user_permissions() {
             # 终止所有会话
             echo ""
             log_warning "这将终止用户的所有活动会话，用户需要重新登录"
-            read -p "确认终止用户 '$username' 的所有会话? [y/N]: " confirm_kill
+            read -p "确认终止用户 '$username' 的所有会话? [y/N]: " confirm_kill || confirm_kill=""
 
             if [[ "$confirm_kill" =~ ^[Yy]$ ]]; then
                 if kubectl exec -n ess "$mas_pod" -- mas-cli manage kill-sessions "$username"; then
@@ -695,8 +696,8 @@ modify_user_permissions() {
             # 发放兼容性token
             echo ""
             log_info "兼容性token用于与Synapse的兼容性"
-            read -p "请输入设备ID (留空自动生成): " device_id
-            read -p "是否授予Synapse管理员权限? [y/N]: " grant_admin
+            read -p "请输入设备ID (留空自动生成): " device_id || device_id=""
+            read -p "是否授予Synapse管理员权限? [y/N]: " grant_admin || grant_admin=""
 
             local cmd_args=("manage" "issue-compatibility-token" "$username")
             if [[ -n "$device_id" ]]; then
@@ -1513,7 +1514,7 @@ fix_all_ess_ports() {
     echo "- Element Web: $ELEMENT_WEB_HOST:$EXTERNAL_HTTPS_PORT"
     echo ""
 
-    read -p "确认开始统一修复? [y/N]: " confirm
+    read -p "确认开始统一修复? [y/N]: " confirm || confirm=""
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
         log_info "操作已取消"
         return 0
@@ -1956,7 +1957,7 @@ generate_registration_link() {
     echo "2) 管理员注册链接"
     echo "0) 返回主菜单"
     echo ""
-    read -p "请选择 [0-2]: " link_type
+    read -p "请选择 [0-2]: " link_type || link_type=""
 
     case $link_type in
         0)
@@ -1991,12 +1992,12 @@ generate_registration_link() {
 
     # 询问token配置
     echo ""
-    read -p "设置使用次数限制? (留空表示无限制): " usage_limit
+    read -p "设置使用次数限制? (留空表示无限制): " usage_limit || usage_limit=""
     if [[ -n "$usage_limit" && "$usage_limit" =~ ^[0-9]+$ ]]; then
         cmd_args+=("--usage-limit" "$usage_limit")
     fi
 
-    read -p "设置过期时间(秒)? (留空表示永不过期): " expires_in
+    read -p "设置过期时间(秒)? (留空表示永不过期): " expires_in || expires_in=""
     if [[ -n "$expires_in" && "$expires_in" =~ ^[0-9]+$ ]]; then
         cmd_args+=("--expires-in" "$expires_in")
     fi
@@ -2149,7 +2150,7 @@ show_logs() {
     echo "6) ESS - 所有服务概览"
     echo "0) 返回主菜单"
     echo ""
-    read -p "请选择 [0-6]: " log_choice
+    read -p "请选择 [0-6]: " log_choice || log_choice=""
 
     case $log_choice in
         0)
@@ -2294,7 +2295,7 @@ restart_services() {
     echo "6) ESS - 所有服务"
     echo "0) 返回主菜单"
     echo ""
-    read -p "请选择 [0-6]: " restart_choice
+    read -p "请选择 [0-6]: " restart_choice || restart_choice=""
 
     case $restart_choice in
         0)
