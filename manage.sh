@@ -2114,32 +2114,52 @@ list_users() {
     echo ""
     echo -e "${YELLOW}尝试从数据库获取用户信息...${NC}"
 
-    # 查找数据库Pod（尝试多种可能的标签）
+    # 查找数据库Pod（基于实际的ESS部署）
     local postgres_pod=""
-    local db_selectors=(
-        "app.kubernetes.io/name=postgres"
-        "app.kubernetes.io/name=postgresql"
-        "app=postgres"
-        "app=postgresql"
-        "component=database"
-    )
 
-    for selector in "${db_selectors[@]}"; do
-        postgres_pod=$(kubectl get pods -n ess -l "$selector" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-        if [[ -n "$postgres_pod" ]]; then
-            log_info "找到数据库Pod: $postgres_pod (使用选择器: $selector)"
-            break
-        fi
-    done
+    # 方法1：直接查找ess-postgres Pod（最常见的ESS部署）
+    postgres_pod=$(kubectl get pods -n ess -o name | grep "ess-postgres" | head -1 | cut -d'/' -f2 2>/dev/null)
 
     if [[ -n "$postgres_pod" ]]; then
-        # 尝试多种可能的数据库配置
+        log_info "找到ESS数据库Pod: $postgres_pod"
+    else
+        # 方法2：尝试标签选择器
+        local db_selectors=(
+            "app.kubernetes.io/name=postgres"
+            "app.kubernetes.io/name=postgresql"
+            "app=postgres"
+            "app=postgresql"
+            "component=database"
+        )
+
+        for selector in "${db_selectors[@]}"; do
+            postgres_pod=$(kubectl get pods -n ess -l "$selector" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+            if [[ -n "$postgres_pod" ]]; then
+                log_info "找到数据库Pod: $postgres_pod (使用选择器: $selector)"
+                break
+            fi
+        done
+    fi
+
+    if [[ -n "$postgres_pod" ]]; then
+        echo ""
+        echo -e "${BLUE}数据库Pod: $postgres_pod${NC}"
+
+        # 首先查看数据库列表
+        echo ""
+        echo -e "${YELLOW}查看可用的数据库：${NC}"
+        kubectl exec -n ess "$postgres_pod" -- psql -U postgres -l 2>/dev/null || {
+            echo "无法列出数据库，尝试其他用户名..."
+        }
+
+        # 尝试多种可能的数据库配置（基于ESS实际部署）
         local db_configs=(
             "postgres:matrixauthenticationservice"
             "postgres:mas"
+            "postgres:synapse"
+            "postgres:matrix"
             "mas:matrixauthenticationservice"
-            "mas:mas"
-            "root:matrixauthenticationservice"
+            "synapse:synapse"
         )
 
         local success=false
@@ -2150,22 +2170,33 @@ list_users() {
             echo ""
             echo -e "${BLUE}尝试连接: 用户=$db_user, 数据库=$db_name${NC}"
 
-            # 尝试查询用户表
-            local queries=(
-                "SELECT username, display_name, email, created_at, locked_at IS NOT NULL as is_locked FROM users ORDER BY created_at;"
-                "SELECT username, email, created_at FROM users ORDER BY created_at;"
-                "SELECT * FROM users LIMIT 10;"
-                "\\dt"  # 列出所有表
-            )
+            # 首先测试连接
+            if kubectl exec -n ess "$postgres_pod" -- psql -U "$db_user" -d "$db_name" -c "\\dt" 2>/dev/null; then
+                echo -e "${GREEN}连接成功！查看用户表...${NC}"
 
-            for query in "${queries[@]}"; do
-                if kubectl exec -n ess "$postgres_pod" -- psql -U "$db_user" -d "$db_name" -c "$query" 2>/dev/null; then
-                    success=true
+                # 尝试查询用户表
+                local queries=(
+                    "SELECT username, display_name, email, created_at, locked_at IS NOT NULL as is_locked FROM users ORDER BY created_at LIMIT 20;"
+                    "SELECT username, email, created_at FROM users ORDER BY created_at LIMIT 20;"
+                    "SELECT id, username, email FROM users ORDER BY created_at LIMIT 20;"
+                    "SELECT * FROM users LIMIT 5;"
+                )
+
+                for query in "${queries[@]}"; do
                     echo ""
-                    echo -e "${GREEN}数据库查询成功！${NC}"
-                    break 2
-                fi
-            done
+                    echo -e "${CYAN}执行查询: ${query}${NC}"
+                    if kubectl exec -n ess "$postgres_pod" -- psql -U "$db_user" -d "$db_name" -c "$query" 2>/dev/null; then
+                        success=true
+                        echo ""
+                        echo -e "${GREEN}✅ 用户列表查询成功！${NC}"
+                        break 2
+                    else
+                        echo -e "${YELLOW}查询失败，尝试下一个...${NC}"
+                    fi
+                done
+            else
+                echo -e "${YELLOW}连接失败${NC}"
+            fi
         done
 
         if [[ "$success" == "false" ]]; then
