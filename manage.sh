@@ -1794,35 +1794,858 @@ apply_ess_config_only() {
     show_main_menu
 }
 
-# 其他占位符函数（待实现）
+# 生成注册链接
 generate_registration_link() {
-    log_warning "注册链接生成功能待实现"
+    log_info "生成注册链接..."
+
+    echo ""
+    echo "请选择注册链接类型:"
+    echo "1) 普通用户注册链接"
+    echo "2) 管理员注册链接"
+    echo "0) 返回主菜单"
+    echo ""
+    read -p "请选择 [0-2]: " link_type
+
+    case $link_type in
+        0)
+            show_main_menu
+            return 0
+            ;;
+        1|2)
+            ;;
+        *)
+            log_error "无效选择"
+            read -p "按任意键返回主菜单..."
+            show_main_menu
+            return 1
+            ;;
+    esac
+
+    # 获取MAS Pod
+    local mas_pod=$(kubectl get pods -n ess -l app.kubernetes.io/name=matrix-authentication-service -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+
+    if [[ -z "$mas_pod" ]]; then
+        log_error "无法找到Matrix Authentication Service Pod"
+        read -p "按任意键返回主菜单..."
+        show_main_menu
+        return 1
+    fi
+
+    # 生成注册链接
+    log_info "正在生成注册链接..."
+
+    local cmd="mas-cli manage generate-registration-token"
+    if [[ "$link_type" == "2" ]]; then
+        cmd="$cmd --admin"
+        log_info "生成管理员注册链接..."
+    else
+        log_info "生成普通用户注册链接..."
+    fi
+
+    local result=$(kubectl exec -n ess "$mas_pod" -- $cmd 2>/dev/null)
+
+    if [[ $? -eq 0 && -n "$result" ]]; then
+        local token=$(echo "$result" | grep -o 'token: [a-zA-Z0-9_-]*' | cut -d' ' -f2)
+        if [[ -n "$token" ]]; then
+            local registration_url="https://$MAS_HOST:$EXTERNAL_HTTPS_PORT/register?token=$token"
+
+            echo ""
+            echo -e "${GREEN}================================${NC}"
+            echo -e "${GREEN}注册链接生成成功！${NC}"
+            echo -e "${GREEN}================================${NC}"
+            echo ""
+            if [[ "$link_type" == "2" ]]; then
+                echo -e "${YELLOW}管理员注册链接：${NC}"
+            else
+                echo -e "${YELLOW}普通用户注册链接：${NC}"
+            fi
+            echo "$registration_url"
+            echo ""
+            echo -e "${BLUE}使用说明：${NC}"
+            echo "1. 将此链接发送给需要注册的用户"
+            echo "2. 用户点击链接即可直接注册账户"
+            if [[ "$link_type" == "2" ]]; then
+                echo "3. 通过此链接注册的用户将自动获得管理员权限"
+            fi
+            echo "4. 每个链接只能使用一次"
+            echo ""
+            echo -e "${YELLOW}注意：请妥善保管此链接，避免泄露${NC}"
+            echo -e "${GREEN}================================${NC}"
+        else
+            log_error "无法解析注册token"
+        fi
+    else
+        log_error "生成注册链接失败"
+        log_info "请检查MAS服务状态"
+    fi
+
     read -p "按任意键返回主菜单..."
     show_main_menu
 }
 
 list_users() {
-    log_warning "用户列表查看功能待实现"
+    log_info "查看用户列表..."
+
+    # 获取MAS Pod
+    local mas_pod=$(kubectl get pods -n ess -l app.kubernetes.io/name=matrix-authentication-service -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+
+    if [[ -z "$mas_pod" ]]; then
+        log_error "无法找到Matrix Authentication Service Pod"
+        read -p "按任意键返回主菜单..."
+        show_main_menu
+        return 1
+    fi
+
+    echo ""
+    echo -e "${BLUE}================================${NC}"
+    echo -e "${BLUE}用户列表${NC}"
+    echo -e "${BLUE}================================${NC}"
+
+    # 获取用户列表
+    log_info "正在获取用户列表..."
+
+    # 使用MAS CLI获取用户信息
+    local users_output=$(kubectl exec -n ess "$mas_pod" -- mas-cli manage list-users 2>/dev/null)
+
+    if [[ $? -eq 0 && -n "$users_output" ]]; then
+        echo "$users_output"
+    else
+        # 如果MAS CLI不支持list-users，尝试其他方法
+        log_warning "无法通过MAS CLI获取用户列表"
+        log_info "尝试从数据库获取用户信息..."
+
+        # 获取Postgres Pod
+        local postgres_pod=$(kubectl get pods -n ess -l app.kubernetes.io/name=postgres -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+
+        if [[ -n "$postgres_pod" ]]; then
+            echo ""
+            echo -e "${YELLOW}从数据库获取的用户信息：${NC}"
+
+            # 查询用户表
+            local db_query="SELECT username, display_name, email, created_at, locked_at IS NOT NULL as is_locked FROM users ORDER BY created_at;"
+
+            kubectl exec -n ess "$postgres_pod" -- psql -U postgres -d matrixauthenticationservice -c "$db_query" 2>/dev/null || {
+                log_warning "无法连接到数据库"
+                echo ""
+                echo -e "${YELLOW}可用的用户管理操作：${NC}"
+                echo "- 创建新用户: 选择菜单选项 2"
+                echo "- 修改用户权限: 选择菜单选项 3"
+                echo "- 生成注册链接: 选择菜单选项 4"
+            }
+        else
+            log_warning "无法找到数据库Pod"
+            echo ""
+            echo -e "${YELLOW}建议的操作：${NC}"
+            echo "1. 检查ESS服务状态: kubectl get pods -n ess"
+            echo "2. 使用其他用户管理功能创建和管理用户"
+        fi
+    fi
+
+    echo ""
+    echo -e "${BLUE}用户管理提示：${NC}"
+    echo "- 创建用户: 菜单选项 2"
+    echo "- 修改权限: 菜单选项 3 (设置管理员、禁用/启用用户)"
+    echo "- 生成注册链接: 菜单选项 4"
+    echo ""
+    echo -e "${BLUE}================================${NC}"
+
     read -p "按任意键返回主菜单..."
     show_main_menu
 }
 
 show_logs() {
-    log_warning "服务日志查看功能待实现"
+    log_info "查看服务日志..."
+
+    echo ""
+    echo "请选择要查看的服务日志:"
+    echo "1) nginx 日志"
+    echo "2) ESS - Matrix Authentication Service"
+    echo "3) ESS - Synapse (Matrix服务器)"
+    echo "4) ESS - Element Web"
+    echo "5) ESS - HAProxy"
+    echo "6) ESS - 所有服务概览"
+    echo "0) 返回主菜单"
+    echo ""
+    read -p "请选择 [0-6]: " log_choice
+
+    case $log_choice in
+        0)
+            show_main_menu
+            return 0
+            ;;
+        1)
+            show_nginx_logs
+            ;;
+        2)
+            show_ess_service_logs "matrix-authentication-service" "MAS (认证服务)"
+            ;;
+        3)
+            show_ess_service_logs "synapse" "Synapse (Matrix服务器)"
+            ;;
+        4)
+            show_ess_service_logs "element-web" "Element Web (客户端)"
+            ;;
+        5)
+            show_ess_service_logs "haproxy" "HAProxy (负载均衡)"
+            ;;
+        6)
+            show_all_ess_logs
+            ;;
+        *)
+            log_error "无效选择"
+            ;;
+    esac
+
     read -p "按任意键返回主菜单..."
     show_main_menu
+}
+
+# 显示nginx日志
+show_nginx_logs() {
+    echo ""
+    echo -e "${BLUE}=== nginx 日志 ===${NC}"
+
+    if command -v nginx >/dev/null 2>&1; then
+        echo ""
+        echo -e "${YELLOW}nginx 访问日志 (最近20行):${NC}"
+        if [[ -f "/var/log/nginx/ess-access.log" ]]; then
+            tail -20 /var/log/nginx/ess-access.log
+        elif [[ -f "/var/log/nginx/access.log" ]]; then
+            tail -20 /var/log/nginx/access.log
+        else
+            echo "未找到nginx访问日志文件"
+        fi
+
+        echo ""
+        echo -e "${YELLOW}nginx 错误日志 (最近20行):${NC}"
+        if [[ -f "/var/log/nginx/ess-error.log" ]]; then
+            tail -20 /var/log/nginx/ess-error.log
+        elif [[ -f "/var/log/nginx/error.log" ]]; then
+            tail -20 /var/log/nginx/error.log
+        else
+            echo "未找到nginx错误日志文件"
+        fi
+
+        echo ""
+        echo -e "${YELLOW}nginx 状态:${NC}"
+        systemctl status nginx --no-pager -l
+    else
+        echo "nginx 未安装"
+    fi
+}
+
+# 显示ESS服务日志
+show_ess_service_logs() {
+    local service_name="$1"
+    local display_name="$2"
+
+    echo ""
+    echo -e "${BLUE}=== $display_name 日志 ===${NC}"
+
+    # 获取Pod名称
+    local pod_name=$(kubectl get pods -n ess -l app.kubernetes.io/name="$service_name" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+
+    if [[ -n "$pod_name" ]]; then
+        echo ""
+        echo -e "${YELLOW}Pod: $pod_name${NC}"
+        echo -e "${YELLOW}最近50行日志:${NC}"
+        kubectl logs -n ess "$pod_name" --tail=50
+
+        echo ""
+        echo -e "${YELLOW}Pod 状态:${NC}"
+        kubectl describe pod -n ess "$pod_name" | grep -A 10 "Conditions:"
+    else
+        echo "未找到 $service_name 服务的Pod"
+        echo ""
+        echo -e "${YELLOW}可用的Pod列表:${NC}"
+        kubectl get pods -n ess
+    fi
+}
+
+# 显示所有ESS服务概览
+show_all_ess_logs() {
+    echo ""
+    echo -e "${BLUE}=== ESS 所有服务状态概览 ===${NC}"
+
+    echo ""
+    echo -e "${YELLOW}Pod 状态:${NC}"
+    kubectl get pods -n ess
+
+    echo ""
+    echo -e "${YELLOW}服务状态:${NC}"
+    kubectl get svc -n ess
+
+    echo ""
+    echo -e "${YELLOW}Ingress 状态:${NC}"
+    kubectl get ingress -n ess
+
+    echo ""
+    echo -e "${YELLOW}最近事件:${NC}"
+    kubectl get events -n ess --sort-by='.lastTimestamp' | tail -10
+
+    echo ""
+    echo -e "${YELLOW}有问题的Pod详情:${NC}"
+    local problem_pods=$(kubectl get pods -n ess --no-headers | grep -v "Running\|Completed" | awk '{print $1}')
+
+    if [[ -n "$problem_pods" ]]; then
+        for pod in $problem_pods; do
+            echo ""
+            echo -e "${RED}问题Pod: $pod${NC}"
+            kubectl describe pod -n ess "$pod" | grep -A 5 "Events:"
+        done
+    else
+        echo "所有Pod运行正常"
+    fi
 }
 
 restart_services() {
-    log_warning "服务重启功能待实现"
+    log_info "重启服务..."
+
+    echo ""
+    echo "请选择要重启的服务:"
+    echo "1) nginx 服务"
+    echo "2) ESS - Matrix Authentication Service"
+    echo "3) ESS - Synapse (Matrix服务器)"
+    echo "4) ESS - Element Web"
+    echo "5) ESS - HAProxy"
+    echo "6) ESS - 所有服务"
+    echo "0) 返回主菜单"
+    echo ""
+    read -p "请选择 [0-6]: " restart_choice
+
+    case $restart_choice in
+        0)
+            show_main_menu
+            return 0
+            ;;
+        1)
+            restart_nginx
+            ;;
+        2)
+            restart_ess_service "ess-matrix-authentication-service" "MAS (认证服务)"
+            ;;
+        3)
+            restart_ess_service "ess-synapse-main" "Synapse (Matrix服务器)" "statefulset"
+            ;;
+        4)
+            restart_ess_service "ess-element-web" "Element Web (客户端)"
+            ;;
+        5)
+            restart_ess_service "ess-haproxy" "HAProxy (负载均衡)"
+            ;;
+        6)
+            restart_all_ess_services
+            ;;
+        *)
+            log_error "无效选择"
+            ;;
+    esac
+
     read -p "按任意键返回主菜单..."
     show_main_menu
 }
 
+# 重启nginx服务
+restart_nginx() {
+    echo ""
+    echo -e "${BLUE}=== 重启 nginx 服务 ===${NC}"
+
+    if command -v nginx >/dev/null 2>&1; then
+        log_warning "即将重启nginx服务，这可能会短暂中断外部访问"
+        read -p "确认继续? [y/N]: " confirm
+
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then
+            log_info "正在重启nginx..."
+
+            # 测试配置
+            if $SUDO_CMD nginx -t; then
+                log_success "nginx配置测试通过"
+
+                # 重启服务
+                if $SUDO_CMD systemctl restart nginx; then
+                    log_success "nginx重启成功"
+
+                    # 检查状态
+                    if systemctl is-active nginx >/dev/null 2>&1; then
+                        log_success "nginx运行状态正常"
+                    else
+                        log_error "nginx重启后状态异常"
+                        systemctl status nginx --no-pager
+                    fi
+                else
+                    log_error "nginx重启失败"
+                    systemctl status nginx --no-pager
+                fi
+            else
+                log_error "nginx配置测试失败，取消重启"
+            fi
+        else
+            log_info "操作已取消"
+        fi
+    else
+        log_error "nginx未安装"
+    fi
+}
+
+# 重启ESS服务
+restart_ess_service() {
+    local service_name="$1"
+    local display_name="$2"
+    local resource_type="${3:-deployment}"  # 默认为deployment
+
+    echo ""
+    echo -e "${BLUE}=== 重启 $display_name ===${NC}"
+
+    # 检查资源是否存在
+    if kubectl get "$resource_type" "$service_name" -n ess >/dev/null 2>&1; then
+        log_warning "即将重启 $display_name，这可能会短暂中断相关功能"
+        read -p "确认继续? [y/N]: " confirm
+
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then
+            log_info "正在重启 $display_name..."
+
+            if kubectl rollout restart "$resource_type/$service_name" -n ess; then
+                log_success "重启命令已执行"
+
+                # 等待重启完成
+                log_info "等待重启完成..."
+                if kubectl rollout status "$resource_type/$service_name" -n ess --timeout=300s; then
+                    log_success "$display_name 重启完成"
+
+                    # 显示新的Pod状态
+                    echo ""
+                    echo -e "${YELLOW}新的Pod状态:${NC}"
+                    kubectl get pods -n ess -l app.kubernetes.io/instance="$service_name"
+                else
+                    log_warning "$display_name 重启超时，请手动检查状态"
+                fi
+            else
+                log_error "$display_name 重启失败"
+            fi
+        else
+            log_info "操作已取消"
+        fi
+    else
+        log_error "未找到服务: $service_name"
+        echo ""
+        echo -e "${YELLOW}可用的服务列表:${NC}"
+        kubectl get deployments,statefulsets -n ess
+    fi
+}
+
+# 重启所有ESS服务
+restart_all_ess_services() {
+    echo ""
+    echo -e "${BLUE}=== 重启所有ESS服务 ===${NC}"
+
+    log_warning "即将重启所有ESS服务，这会导致Matrix服务完全中断"
+    log_warning "重启过程可能需要几分钟时间"
+    echo ""
+    read -p "确认继续? [y/N]: " confirm
+
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        log_info "开始重启所有ESS服务..."
+
+        # 定义服务重启顺序（重要性从低到高）
+        local services=(
+            "deployment/ess-element-web:Element Web"
+            "deployment/ess-haproxy:HAProxy"
+            "deployment/ess-matrix-authentication-service:MAS"
+            "statefulset/ess-synapse-main:Synapse"
+        )
+
+        local success_count=0
+        local total_count=${#services[@]}
+
+        for service_info in "${services[@]}"; do
+            local service_type_name="${service_info%%:*}"
+            local service_display="${service_info##*:}"
+
+            echo ""
+            echo -e "${YELLOW}重启 $service_display...${NC}"
+
+            if kubectl rollout restart "$service_type_name" -n ess; then
+                log_info "等待 $service_display 重启完成..."
+                if kubectl rollout status "$service_type_name" -n ess --timeout=300s; then
+                    log_success "$service_display 重启完成"
+                    ((success_count++))
+                else
+                    log_warning "$service_display 重启超时"
+                fi
+            else
+                log_error "$service_display 重启失败"
+            fi
+
+            # 短暂等待
+            sleep 5
+        done
+
+        echo ""
+        echo -e "${BLUE}=== 重启结果总结 ===${NC}"
+        echo "成功重启: $success_count/$total_count 个服务"
+
+        if [[ $success_count -eq $total_count ]]; then
+            log_success "所有ESS服务重启完成！"
+        else
+            log_warning "部分服务重启失败，请检查服务状态"
+        fi
+
+        echo ""
+        echo -e "${YELLOW}当前服务状态:${NC}"
+        kubectl get pods -n ess
+    else
+        log_info "操作已取消"
+    fi
+}
+
 backup_config() {
-    log_warning "配置备份功能待实现"
+    log_info "备份配置..."
+
+    local backup_timestamp=$(date +%Y%m%d-%H%M%S)
+    local backup_dir="/root/ess-backup-$backup_timestamp"
+
+    echo ""
+    echo "请选择备份类型:"
+    echo "1) 完整备份 (推荐)"
+    echo "2) 仅备份nginx配置"
+    echo "3) 仅备份ESS配置"
+    echo "4) 仅备份SSL证书"
+    echo "0) 返回主菜单"
+    echo ""
+    read -p "请选择 [0-4]: " backup_choice
+
+    case $backup_choice in
+        0)
+            show_main_menu
+            return 0
+            ;;
+        1)
+            create_full_backup "$backup_dir"
+            ;;
+        2)
+            create_nginx_backup "$backup_dir"
+            ;;
+        3)
+            create_ess_backup "$backup_dir"
+            ;;
+        4)
+            create_ssl_backup "$backup_dir"
+            ;;
+        *)
+            log_error "无效选择"
+            read -p "按任意键返回主菜单..."
+            show_main_menu
+            return 1
+            ;;
+    esac
+
     read -p "按任意键返回主菜单..."
     show_main_menu
+}
+
+# 创建完整备份
+create_full_backup() {
+    local backup_dir="$1"
+
+    echo ""
+    echo -e "${BLUE}=== 创建完整备份 ===${NC}"
+    log_info "备份目录: $backup_dir"
+
+    # 创建备份目录
+    mkdir -p "$backup_dir"
+
+    local success_count=0
+    local total_count=4
+
+    # 1. 备份nginx配置
+    echo ""
+    echo -e "${YELLOW}1/4 备份nginx配置...${NC}"
+    if backup_nginx_configs "$backup_dir/nginx"; then
+        ((success_count++))
+        log_success "nginx配置备份完成"
+    else
+        log_error "nginx配置备份失败"
+    fi
+
+    # 2. 备份ESS配置
+    echo ""
+    echo -e "${YELLOW}2/4 备份ESS配置...${NC}"
+    if backup_ess_configs "$backup_dir/ess"; then
+        ((success_count++))
+        log_success "ESS配置备份完成"
+    else
+        log_error "ESS配置备份失败"
+    fi
+
+    # 3. 备份SSL证书
+    echo ""
+    echo -e "${YELLOW}3/4 备份SSL证书...${NC}"
+    if backup_ssl_certs "$backup_dir/ssl"; then
+        ((success_count++))
+        log_success "SSL证书备份完成"
+    else
+        log_error "SSL证书备份失败"
+    fi
+
+    # 4. 备份脚本配置
+    echo ""
+    echo -e "${YELLOW}4/4 备份脚本配置...${NC}"
+    if backup_script_configs "$backup_dir/script"; then
+        ((success_count++))
+        log_success "脚本配置备份完成"
+    else
+        log_error "脚本配置备份失败"
+    fi
+
+    # 创建备份信息文件
+    create_backup_info "$backup_dir"
+
+    # 压缩备份
+    echo ""
+    echo -e "${YELLOW}压缩备份文件...${NC}"
+    if tar -czf "$backup_dir.tar.gz" -C "$(dirname "$backup_dir")" "$(basename "$backup_dir")"; then
+        log_success "备份压缩完成: $backup_dir.tar.gz"
+
+        # 删除原始目录
+        rm -rf "$backup_dir"
+
+        # 显示备份大小
+        local backup_size=$(du -h "$backup_dir.tar.gz" | cut -f1)
+        echo ""
+        echo -e "${GREEN}=== 完整备份完成 ===${NC}"
+        echo "备份文件: $backup_dir.tar.gz"
+        echo "备份大小: $backup_size"
+        echo "成功备份: $success_count/$total_count 个组件"
+
+        if [[ $success_count -eq $total_count ]]; then
+            echo -e "${GREEN}所有组件备份成功！${NC}"
+        else
+            echo -e "${YELLOW}部分组件备份失败，请检查日志${NC}"
+        fi
+    else
+        log_error "备份压缩失败"
+    fi
+}
+
+# 创建nginx备份
+create_nginx_backup() {
+    local backup_dir="$1"
+
+    echo ""
+    echo -e "${BLUE}=== 备份nginx配置 ===${NC}"
+
+    mkdir -p "$backup_dir"
+
+    if backup_nginx_configs "$backup_dir"; then
+        log_success "nginx配置备份完成: $backup_dir"
+    else
+        log_error "nginx配置备份失败"
+    fi
+}
+
+# 创建ESS备份
+create_ess_backup() {
+    local backup_dir="$1"
+
+    echo ""
+    echo -e "${BLUE}=== 备份ESS配置 ===${NC}"
+
+    mkdir -p "$backup_dir"
+
+    if backup_ess_configs "$backup_dir"; then
+        log_success "ESS配置备份完成: $backup_dir"
+    else
+        log_error "ESS配置备份失败"
+    fi
+}
+
+# 创建SSL备份
+create_ssl_backup() {
+    local backup_dir="$1"
+
+    echo ""
+    echo -e "${BLUE}=== 备份SSL证书 ===${NC}"
+
+    mkdir -p "$backup_dir"
+
+    if backup_ssl_certs "$backup_dir"; then
+        log_success "SSL证书备份完成: $backup_dir"
+    else
+        log_error "SSL证书备份失败"
+    fi
+}
+
+# 备份nginx配置文件
+backup_nginx_configs() {
+    local backup_dir="$1"
+    mkdir -p "$backup_dir"
+
+    local success=true
+
+    # 备份nginx主配置
+    if [[ -f "/etc/nginx/nginx.conf" ]]; then
+        cp "/etc/nginx/nginx.conf" "$backup_dir/" || success=false
+    fi
+
+    # 备份sites-available
+    if [[ -d "/etc/nginx/sites-available" ]]; then
+        cp -r "/etc/nginx/sites-available" "$backup_dir/" || success=false
+    fi
+
+    # 备份sites-enabled
+    if [[ -d "/etc/nginx/sites-enabled" ]]; then
+        cp -r "/etc/nginx/sites-enabled" "$backup_dir/" || success=false
+    fi
+
+    # 备份nginx日志（最近的）
+    mkdir -p "$backup_dir/logs"
+    if [[ -f "/var/log/nginx/ess-access.log" ]]; then
+        tail -1000 "/var/log/nginx/ess-access.log" > "$backup_dir/logs/ess-access.log" 2>/dev/null || true
+    fi
+    if [[ -f "/var/log/nginx/ess-error.log" ]]; then
+        tail -1000 "/var/log/nginx/ess-error.log" > "$backup_dir/logs/ess-error.log" 2>/dev/null || true
+    fi
+
+    $success
+}
+
+# 备份ESS配置
+backup_ess_configs() {
+    local backup_dir="$1"
+    mkdir -p "$backup_dir"
+
+    local success=true
+
+    # 备份helm values
+    if helm get values ess -n ess > "$backup_dir/helm-values.yaml" 2>/dev/null; then
+        log_info "helm values备份完成"
+    else
+        log_warning "helm values备份失败"
+        success=false
+    fi
+
+    # 备份所有ConfigMaps
+    if kubectl get configmap -n ess -o yaml > "$backup_dir/configmaps.yaml" 2>/dev/null; then
+        log_info "ConfigMaps备份完成"
+    else
+        log_warning "ConfigMaps备份失败"
+        success=false
+    fi
+
+    # 备份Secrets（不包含敏感数据）
+    if kubectl get secrets -n ess -o yaml > "$backup_dir/secrets.yaml" 2>/dev/null; then
+        log_info "Secrets备份完成"
+    else
+        log_warning "Secrets备份失败"
+        success=false
+    fi
+
+    # 备份Ingress配置
+    if kubectl get ingress -n ess -o yaml > "$backup_dir/ingress.yaml" 2>/dev/null; then
+        log_info "Ingress配置备份完成"
+    else
+        log_warning "Ingress配置备份失败"
+        success=false
+    fi
+
+    # 备份脚本生成的配置文件
+    if [[ -d "$ESS_CONFIG_DIR" ]]; then
+        cp -r "$ESS_CONFIG_DIR" "$backup_dir/script-configs" || success=false
+    fi
+
+    $success
+}
+
+# 备份SSL证书
+backup_ssl_certs() {
+    local backup_dir="$1"
+    mkdir -p "$backup_dir"
+
+    local success=true
+
+    # 备份nginx使用的SSL证书
+    if [[ -f "/etc/ssl/certs/ess-combined.crt" ]]; then
+        cp "/etc/ssl/certs/ess-combined.crt" "$backup_dir/" || success=false
+    fi
+
+    if [[ -f "/etc/ssl/private/ess-combined.key" ]]; then
+        cp "/etc/ssl/private/ess-combined.key" "$backup_dir/" || success=false
+    fi
+
+    # 备份DH参数
+    if [[ -f "/etc/ssl/certs/dhparam.pem" ]]; then
+        cp "/etc/ssl/certs/dhparam.pem" "$backup_dir/" || success=false
+    fi
+
+    # 备份Kubernetes中的TLS secrets
+    kubectl get secrets -n ess -o yaml | grep -A 20 -B 5 "tls.crt\|tls.key" > "$backup_dir/k8s-tls-secrets.yaml" 2>/dev/null || true
+
+    $success
+}
+
+# 备份脚本配置
+backup_script_configs() {
+    local backup_dir="$1"
+    mkdir -p "$backup_dir"
+
+    local success=true
+
+    # 备份脚本本身
+    if [[ -f "$0" ]]; then
+        cp "$0" "$backup_dir/manage.sh" || success=false
+    fi
+
+    # 备份环境变量配置（如果存在）
+    if [[ -f "/root/.ess-config" ]]; then
+        cp "/root/.ess-config" "$backup_dir/" || true
+    fi
+
+    # 备份历史配置文件
+    if [[ -d "/root/ess-config-values" ]]; then
+        cp -r "/root/ess-config-values" "$backup_dir/" || success=false
+    fi
+
+    $success
+}
+
+# 创建备份信息文件
+create_backup_info() {
+    local backup_dir="$1"
+
+    cat > "$backup_dir/backup-info.txt" <<EOF
+ESS配置备份信息
+================
+
+备份时间: $(date)
+备份类型: 完整备份
+服务器: $(hostname)
+操作系统: $(cat /etc/os-release | grep PRETTY_NAME | cut -d'"' -f2)
+
+组件版本信息:
+- nginx: $(nginx -v 2>&1 | cut -d' ' -f3 | cut -d'/' -f2)
+- kubectl: $(kubectl version --client --short 2>/dev/null | cut -d' ' -f3)
+- helm: $(helm version --short 2>/dev/null)
+
+ESS服务状态:
+$(kubectl get pods -n ess 2>/dev/null || echo "无法获取ESS状态")
+
+备份内容:
+- nginx配置文件
+- ESS Kubernetes配置
+- SSL证书
+- 脚本配置文件
+
+恢复说明:
+1. 解压备份文件
+2. 根据需要恢复相应的配置文件
+3. 重启相关服务
+4. 验证服务状态
+
+注意事项:
+- 此备份不包含数据库数据
+- SSL私钥已备份，请妥善保管
+- 恢复前请确保目标环境兼容
+EOF
 }
 
 # 主程序入口
