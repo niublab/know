@@ -2832,8 +2832,39 @@ $(kubectl get pods -n ess 2>/dev/null || echo "无法获取ESS状态")
 EOF
 }
 
+# 安全加载配置（为用户管理功能提供默认值）
+load_config() {
+    # 设置默认值，防止变量未定义
+    SERVER_NAME=${SERVER_NAME:-"niub.win"}
+    ELEMENT_WEB_HOST=${ELEMENT_WEB_HOST:-"app.niub.win"}
+    MAS_HOST=${MAS_HOST:-"mas.niub.win"}
+    RTC_HOST=${RTC_HOST:-"rtc.niub.win"}
+    SYNAPSE_HOST=${SYNAPSE_HOST:-"matrix.niub.win"}
+    EXTERNAL_HTTP_PORT=${EXTERNAL_HTTP_PORT:-"8080"}
+    EXTERNAL_HTTPS_PORT=${EXTERNAL_HTTPS_PORT:-"8443"}
+
+    # 尝试从配置文件读取（如果存在）
+    if [[ -f "$ESS_CONFIG_DIR/hostnames.yaml" ]]; then
+        local server_name=$(grep "serverName:" "$ESS_CONFIG_DIR/hostnames.yaml" | awk '{print $2}' 2>/dev/null || echo "")
+        local element_web_host=$(grep -A2 "elementWeb:" "$ESS_CONFIG_DIR/hostnames.yaml" | grep "host:" | awk '{print $2}' 2>/dev/null || echo "")
+        local mas_host=$(grep -A2 "matrixAuthenticationService:" "$ESS_CONFIG_DIR/hostnames.yaml" | grep "host:" | awk '{print $2}' 2>/dev/null || echo "")
+        local rtc_host=$(grep -A2 "matrixRTC:" "$ESS_CONFIG_DIR/hostnames.yaml" | grep "host:" | awk '{print $2}' 2>/dev/null || echo "")
+        local synapse_host=$(grep -A2 "synapse:" "$ESS_CONFIG_DIR/hostnames.yaml" | grep "host:" | awk '{print $2}' 2>/dev/null || echo "")
+
+        # 只有在成功读取到值时才覆盖默认值
+        [[ -n "$server_name" ]] && SERVER_NAME="$server_name"
+        [[ -n "$element_web_host" ]] && ELEMENT_WEB_HOST="$element_web_host"
+        [[ -n "$mas_host" ]] && MAS_HOST="$mas_host"
+        [[ -n "$rtc_host" ]] && RTC_HOST="$rtc_host"
+        [[ -n "$synapse_host" ]] && SYNAPSE_HOST="$synapse_host"
+    fi
+}
+
 # 主程序入口
 main() {
+    # 加载配置（确保所有函数都能使用配置变量）
+    load_config
+
     # 显示主菜单
     show_main_menu
 }
