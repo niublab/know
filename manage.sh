@@ -680,34 +680,8 @@ server {
         client_max_body_size 50M;
     }
 
-    # 主要反代配置
-    location / {
-        # 反代到Traefik HTTP端口（官方推荐8080）
-        proxy_pass http://127.0.0.1:8080;
-
-        # 代理头设置（官方推荐）
-        proxy_set_header X-Forwarded-For \$remote_addr;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Forwarded-Port \$server_port;
-
-        # 文件上传限制（官方推荐50M）
-        client_max_body_size 50M;
-
-        # WebSocket支持（官方推荐）
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-
-        # 超时配置（官方推荐）
-        proxy_read_timeout 86400s;
-        proxy_send_timeout 86400s;
-
-        # 禁用缓冲（官方推荐）
-        proxy_buffering off;
-    }
-
     # 自定义端口的well-known服务器配置（修复端口问题）
+    # 注意：必须在通用location之前，确保优先匹配
     location /.well-known/matrix/server {
         return 200 '{\"m.server\": \"$SYNAPSE_HOST:$EXTERNAL_HTTPS_PORT\"}';
         add_header Content-Type application/json;
@@ -745,6 +719,33 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_set_header X-Forwarded-Port \$server_port;
         add_header Access-Control-Allow-Origin *;
+    }
+
+    # 主要反代配置（放在最后，避免拦截well-known请求）
+    location / {
+        # 反代到Traefik HTTP端口（官方推荐8080）
+        proxy_pass http://127.0.0.1:8080;
+
+        # 代理头设置（官方推荐）
+        proxy_set_header X-Forwarded-For \$remote_addr;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-Port \$server_port;
+
+        # 文件上传限制（官方推荐50M）
+        client_max_body_size 50M;
+
+        # WebSocket支持（官方推荐）
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        # 超时配置（官方推荐）
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+
+        # 禁用缓冲（官方推荐）
+        proxy_buffering off;
     }
 }
 EOF
