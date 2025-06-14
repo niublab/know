@@ -264,15 +264,19 @@ show_main_menu() {
     echo "9) 生成注册链接"
     echo "10) 查看用户列表"
     echo ""
+    echo -e "${GREEN}=== ESS配置管理 ===${NC}"
+    echo "11) 生成ESS外部URL配置"
+    echo "12) 应用ESS外部URL配置"
+    echo ""
     echo -e "${GREEN}=== 系统管理 ===${NC}"
-    echo "11) 查看系统状态"
-    echo "12) 查看服务日志"
-    echo "13) 重启服务"
-    echo "14) 备份配置"
+    echo "13) 查看系统状态"
+    echo "14) 查看服务日志"
+    echo "15) 重启服务"
+    echo "16) 备份配置"
     echo ""
     echo "0) 退出"
     echo ""
-    read -p "请输入选择 [0-14]: " choice
+    read -p "请输入选择 [0-16]: " choice
 
     case $choice in
         1) full_setup ;;
@@ -285,10 +289,12 @@ show_main_menu() {
         8) modify_user_permissions ;;
         9) generate_registration_link ;;
         10) list_users ;;
-        11) show_status ;;
-        12) show_logs ;;
-        13) restart_services ;;
-        14) backup_config ;;
+        11) generate_ess_config_only ;;
+        12) apply_ess_config_only ;;
+        13) show_status ;;
+        14) show_logs ;;
+        15) restart_services ;;
+        16) backup_config ;;
         0) exit 0 ;;
         *)
             log_error "无效选择"
@@ -887,6 +893,105 @@ configure_firewall() {
     fi
 }
 
+# 生成ESS外部URL配置
+generate_ess_external_config() {
+    log_info "生成ESS外部URL配置..."
+
+    local config_file="$ESS_CONFIG_DIR/external-urls.yaml"
+
+    # 创建配置目录
+    mkdir -p "$ESS_CONFIG_DIR"
+
+    # 生成ESS外部URL配置
+    cat > "$config_file" <<EOF
+# ESS外部URL配置 - 修复自定义端口问题
+# 生成时间: $(date)
+
+# Matrix Authentication Service外部URL配置
+matrixAuthenticationService:
+  config:
+    http:
+      public_base: "https://$MAS_HOST:$EXTERNAL_HTTPS_PORT"
+
+# Synapse外部URL配置
+synapse:
+  config:
+    public_baseurl: "https://$SYNAPSE_HOST:$EXTERNAL_HTTPS_PORT"
+
+# Element Web外部URL配置
+elementWeb:
+  config:
+    default_server_config:
+      m.homeserver:
+        base_url: "https://$SYNAPSE_HOST:$EXTERNAL_HTTPS_PORT"
+        server_name: "$SERVER_NAME"
+
+# Matrix RTC外部URL配置
+matrixRTC:
+  config:
+    external_url: "https://$RTC_HOST:$EXTERNAL_HTTPS_PORT"
+EOF
+
+    log_success "ESS外部URL配置生成完成: $config_file"
+    log_info "此配置修复了MAS、Synapse等服务的外部URL端口问题"
+}
+
+# 应用ESS配置
+apply_ess_config() {
+    log_info "应用ESS外部URL配置..."
+
+    local config_file="$ESS_CONFIG_DIR/external-urls.yaml"
+
+    if [[ ! -f "$config_file" ]]; then
+        log_error "ESS外部URL配置文件不存在: $config_file"
+        return 1
+    fi
+
+    # 检查helm是否可用
+    if ! command -v helm >/dev/null 2>&1; then
+        log_error "helm命令不可用，无法应用ESS配置"
+        log_info "请手动应用配置文件: $config_file"
+        return 1
+    fi
+
+    # 查找ESS helm release
+    local ess_release=$(helm list -n ess -o json | jq -r '.[0].name' 2>/dev/null || echo "")
+
+    if [[ -z "$ess_release" ]]; then
+        log_error "无法找到ESS helm release"
+        log_info "请手动应用配置文件: $config_file"
+        return 1
+    fi
+
+    log_info "找到ESS release: $ess_release"
+    log_warning "即将重新部署ESS以应用外部URL配置"
+    log_warning "这将重启ESS服务，可能造成短暂中断"
+
+    read -p "确认继续? [y/N]: " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        log_info "操作已取消"
+        log_info "配置文件已生成: $config_file"
+        log_info "您可以稍后手动应用此配置"
+        return 0
+    fi
+
+    # 应用配置
+    log_info "正在应用ESS配置..."
+    if helm upgrade "$ess_release" -n ess \
+        -f "$ESS_CONFIG_DIR/hostnames.yaml" \
+        -f "$config_file" \
+        --reuse-values; then
+        log_success "ESS配置应用成功"
+        log_info "等待ESS服务重启..."
+        sleep 30
+        log_info "请检查ESS服务状态: kubectl get pods -n ess"
+    else
+        log_error "ESS配置应用失败"
+        log_info "请检查配置文件并手动应用: $config_file"
+        return 1
+    fi
+}
+
 # 完整配置
 full_setup() {
     log_info "开始完整nginx反代配置..."
@@ -923,6 +1028,9 @@ full_setup() {
         # 配置防火墙
         configure_firewall
 
+        # 生成ESS外部URL配置
+        generate_ess_external_config
+
         echo ""
         echo -e "${GREEN}================================${NC}"
         echo -e "${GREEN}ESS nginx反代配置完成！${NC}"
@@ -940,6 +1048,21 @@ full_setup() {
         echo "- ✅ WebSocket支持"
         echo "- ✅ 自定义端口well-known配置"
         echo "- ✅ 防火墙规则自动配置"
+        echo "- ✅ ESS外部URL配置生成"
+        echo ""
+        echo -e "${YELLOW}重要提醒：${NC}"
+        echo "1. nginx反代配置已完成"
+        echo "2. ESS外部URL配置已生成但未应用"
+        echo "3. 需要应用ESS配置以修复MAS等服务的URL问题"
+        echo ""
+        read -p "是否现在应用ESS外部URL配置? [y/N]: " apply_now
+        if [[ "$apply_now" =~ ^[Yy]$ ]]; then
+            apply_ess_config
+        else
+            log_info "ESS外部URL配置已生成: $ESS_CONFIG_DIR/external-urls.yaml"
+            log_info "您可以稍后选择菜单选项来应用此配置"
+        fi
+
         echo ""
         echo "请确保DNS解析指向此服务器IP"
         echo -e "${GREEN}================================${NC}"
@@ -953,6 +1076,65 @@ full_setup() {
         return 1
     fi
 
+    read -p "按任意键返回主菜单..."
+    show_main_menu
+}
+
+# 仅生成ESS配置
+generate_ess_config_only() {
+    log_info "仅生成ESS外部URL配置..."
+
+    check_system_requirements
+    read_ess_config
+    configure_custom_ports
+    generate_ess_external_config
+
+    log_success "ESS外部URL配置生成完成"
+    log_info "配置文件位置: $ESS_CONFIG_DIR/external-urls.yaml"
+    log_info "请选择菜单选项12来应用此配置"
+
+    read -p "按任意键返回主菜单..."
+    show_main_menu
+}
+
+# 仅应用ESS配置
+apply_ess_config_only() {
+    log_info "仅应用ESS外部URL配置..."
+
+    check_system_requirements
+    apply_ess_config
+
+    read -p "按任意键返回主菜单..."
+    show_main_menu
+}
+
+# 其他占位符函数（待实现）
+generate_registration_link() {
+    log_warning "注册链接生成功能待实现"
+    read -p "按任意键返回主菜单..."
+    show_main_menu
+}
+
+list_users() {
+    log_warning "用户列表查看功能待实现"
+    read -p "按任意键返回主菜单..."
+    show_main_menu
+}
+
+show_logs() {
+    log_warning "服务日志查看功能待实现"
+    read -p "按任意键返回主菜单..."
+    show_main_menu
+}
+
+restart_services() {
+    log_warning "服务重启功能待实现"
+    read -p "按任意键返回主菜单..."
+    show_main_menu
+}
+
+backup_config() {
+    log_warning "配置备份功能待实现"
     read -p "按任意键返回主菜单..."
     show_main_menu
 }
