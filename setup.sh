@@ -18,7 +18,16 @@ NC='\033[0m' # No Color
 SCRIPT_VERSION="1.0.0"
 ESS_VERSION="25.6.1"
 NAMESPACE="ess"
-CONFIG_DIR="$HOME/ess-config-values"
+SUDO_CMD="sudo"  # 将在check_system_requirements中根据用户类型设置
+
+# 设置配置目录（根据用户类型）
+if [[ $EUID -eq 0 ]]; then
+    CONFIG_DIR="/root/ess-config-values"
+    KUBE_CONFIG="/root/.kube/config"
+else
+    CONFIG_DIR="$HOME/ess-config-values"
+    KUBE_CONFIG="$HOME/.kube/config"
+fi
 
 # 日志函数
 log_info() {
@@ -51,6 +60,12 @@ show_license() {
     echo "- 学习研究: ✓ 允许"
     echo "- 商业用途: ✗ 禁止"
     echo ""
+    if [[ $EUID -eq 0 ]]; then
+        echo -e "${BLUE}运行模式: root 用户${NC}"
+    else
+        echo -e "${BLUE}运行模式: 普通用户 (sudo)${NC}"
+    fi
+    echo ""
     echo "继续使用即表示您同意遵守 AGPL-3.0 许可证条款"
     echo -e "${YELLOW}================================${NC}"
     echo ""
@@ -59,22 +74,24 @@ show_license() {
 # 检查系统要求
 check_system_requirements() {
     log_info "检查系统要求..."
-    
+
     # 检查操作系统
     if [[ ! -f /etc/debian_version ]]; then
         log_error "此脚本仅支持 Debian 系列操作系统"
         exit 1
     fi
-    
-    # 检查 sudo 权限
+
+    # 检查用户权限
     if [[ $EUID -eq 0 ]]; then
-        log_error "请不要以 root 用户运行此脚本，请使用具有 sudo 权限的普通用户"
-        exit 1
-    fi
-    
-    if ! sudo -n true 2>/dev/null; then
-        log_error "当前用户没有 sudo 权限"
-        exit 1
+        log_warning "检测到以 root 用户运行"
+        SUDO_CMD=""
+    else
+        if ! sudo -n true 2>/dev/null; then
+            log_error "当前用户没有 sudo 权限，请使用 root 用户或具有 sudo 权限的用户运行"
+            exit 1
+        fi
+        SUDO_CMD="sudo"
+        log_info "检测到普通用户，将使用 sudo 执行特权操作"
     fi
     
     # 检查内存和CPU
@@ -117,25 +134,36 @@ check_network() {
 # 安装 K3s
 install_k3s() {
     log_info "安装 K3s..."
-    
+
     if command -v k3s >/dev/null 2>&1; then
         log_warning "K3s 已安装，跳过安装步骤"
         return 0
     fi
-    
+
     # 安装 K3s
-    curl -sfL https://get.k3s.io | sh -
-    
+    curl -sfL https://get.k3s.io | $SUDO_CMD sh -
+
     # 配置 kubeconfig
-    mkdir -p ~/.kube
-    export KUBECONFIG=~/.kube/config
-    sudo k3s kubectl config view --raw > "$KUBECONFIG"
-    chmod 600 "$KUBECONFIG"
-    chown "$USER:$USER" "$KUBECONFIG"
-    
+    mkdir -p "$(dirname "$KUBE_CONFIG")"
+    export KUBECONFIG="$KUBE_CONFIG"
+    $SUDO_CMD k3s kubectl config view --raw > "$KUBE_CONFIG"
+    chmod 600 "$KUBE_CONFIG"
+
+    # 设置文件所有者（仅在非root用户时需要）
+    if [[ $EUID -ne 0 ]]; then
+        chown "$USER:$USER" "$KUBE_CONFIG"
+    fi
+
     # 添加到 bashrc
-    if ! grep -q "export KUBECONFIG=~/.kube/config" ~/.bashrc; then
-        echo "export KUBECONFIG=~/.kube/config" >> ~/.bashrc
+    local bashrc_file
+    if [[ $EUID -eq 0 ]]; then
+        bashrc_file="/root/.bashrc"
+    else
+        bashrc_file="$HOME/.bashrc"
+    fi
+
+    if ! grep -q "export KUBECONFIG=" "$bashrc_file" 2>/dev/null; then
+        echo "export KUBECONFIG=\"$KUBE_CONFIG\"" >> "$bashrc_file"
     fi
     
     # 等待 K3s 启动
@@ -592,8 +620,8 @@ show_status() {
 # 主程序入口
 main() {
     # 设置环境变量
-    export KUBECONFIG=~/.kube/config
-    
+    export KUBECONFIG="$KUBE_CONFIG"
+
     # 显示主菜单
     show_main_menu
 }
