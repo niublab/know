@@ -268,18 +268,19 @@ show_main_menu() {
     echo "11) 修复所有ESS端口配置问题 (推荐)"
     echo "12) 修复MAS ConfigMap端口问题"
     echo "13) 修复well-known ConfigMap端口问题"
-    echo "14) 生成ESS外部URL配置"
-    echo "15) 应用ESS外部URL配置"
+    echo "14) 修复Element Web ConfigMap端口问题"
+    echo "15) 生成ESS外部URL配置"
+    echo "16) 应用ESS外部URL配置"
     echo ""
     echo -e "${GREEN}=== 系统管理 ===${NC}"
-    echo "16) 查看系统状态"
-    echo "17) 查看服务日志"
-    echo "18) 重启服务"
-    echo "19) 备份配置"
+    echo "17) 查看系统状态"
+    echo "18) 查看服务日志"
+    echo "19) 重启服务"
+    echo "20) 备份配置"
     echo ""
     echo "0) 退出"
     echo ""
-    read -p "请输入选择 [0-19]: " choice
+    read -p "请输入选择 [0-20]: " choice
 
     case $choice in
         1) full_setup ;;
@@ -295,12 +296,13 @@ show_main_menu() {
         11) fix_all_ess_ports_only ;;
         12) fix_mas_configmap_only ;;
         13) fix_wellknown_configmap_only ;;
-        14) generate_ess_config_only ;;
-        15) apply_ess_config_only ;;
-        16) show_status ;;
-        17) show_logs ;;
-        18) restart_services ;;
-        19) backup_config ;;
+        14) fix_element_web_configmap_only ;;
+        15) generate_ess_config_only ;;
+        16) apply_ess_config_only ;;
+        17) show_status ;;
+        18) show_logs ;;
+        19) restart_services ;;
+        20) backup_config ;;
         0) exit 0 ;;
         *)
             log_error "无效选择"
@@ -1247,6 +1249,121 @@ fix_ess_wellknown_configmap() {
     log_info "备份文件: $backup_file"
 }
 
+# 修复Element Web ConfigMap中的端口问题
+fix_element_web_configmap() {
+    log_info "修复Element Web ConfigMap中的端口问题..."
+
+    # 检查当前Element Web配置
+    local current_base_url=$(kubectl get configmap ess-element-web -n ess -o jsonpath='{.data.config\.json}' 2>/dev/null | grep -o '"base_url":"[^"]*"' | cut -d'"' -f4 || echo "")
+
+    if [[ -z "$current_base_url" ]]; then
+        log_error "无法获取Element Web ConfigMap中的base_url配置"
+        return 1
+    fi
+
+    log_info "当前Element Web base_url配置: $current_base_url"
+
+    # 检查是否需要修复
+    local expected_base_url="https://$SYNAPSE_HOST:$EXTERNAL_HTTPS_PORT"
+
+    if [[ "$current_base_url" == "$expected_base_url" ]]; then
+        log_success "Element Web ConfigMap配置已正确，无需修复"
+        return 0
+    fi
+
+    log_warning "需要修复Element Web ConfigMap配置"
+    log_info "当前值: $current_base_url"
+    log_info "期望值: $expected_base_url"
+
+    read -p "确认修复Element Web ConfigMap? [y/N]: " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        log_info "操作已取消"
+        return 0
+    fi
+
+    # 备份当前ConfigMap
+    local backup_file="$ESS_CONFIG_DIR/element-web-configmap-backup-$(date +%Y%m%d-%H%M%S).yaml"
+    if kubectl get configmap ess-element-web -n ess -o yaml > "$backup_file" 2>/dev/null; then
+        log_success "ConfigMap备份完成: $backup_file"
+    else
+        log_warning "ConfigMap备份失败"
+    fi
+
+    # 修复Element Web配置（使用自定义域名和端口）
+    log_info "正在修复Element Web配置..."
+    local element_config="{
+  \"bug_report_endpoint_url\": \"https://element.io/bugreports/submit\",
+  \"default_server_config\": {
+    \"m.homeserver\": {
+      \"base_url\": \"$expected_base_url\",
+      \"server_name\": \"$SERVER_NAME\"
+    }
+  },
+  \"element_call\": {
+    \"use_exclusively\": true
+  },
+  \"embedded_pages\": {
+    \"login_for_welcome\": true
+  },
+  \"features\": {
+    \"feature_element_call_video_rooms\": true,
+    \"feature_group_calls\": true,
+    \"feature_new_room_decoration_ui\": true,
+    \"feature_video_rooms\": true
+  },
+  \"map_style_url\": \"https://api.maptiler.com/maps/streets/style.json?key=fU3vlMsMn4Jb6dnEIFsx\",
+  \"setting_defaults\": {
+    \"UIFeature.deactivate\": false,
+    \"UIFeature.passwordReset\": false,
+    \"UIFeature.registration\": false,
+    \"feature_group_calls\": true
+  },
+  \"sso_redirect_options\": {
+    \"immediate\": false
+  }
+}"
+
+    if kubectl patch configmap ess-element-web -n ess --type merge -p "{\"data\":{\"config.json\":\"$element_config\"}}"; then
+        log_success "Element Web配置修复成功"
+    else
+        log_error "Element Web配置修复失败"
+        return 1
+    fi
+
+    # 重启Element Web服务
+    log_info "重启Element Web服务以应用新配置..."
+    if kubectl rollout restart deployment ess-element-web -n ess; then
+        log_success "Element Web服务重启命令已执行"
+
+        # 等待重启完成
+        log_info "等待Element Web服务重启完成..."
+        if kubectl rollout status deployment ess-element-web -n ess --timeout=300s; then
+            log_success "Element Web服务重启完成"
+        else
+            log_warning "Element Web服务重启超时，请手动检查状态"
+        fi
+    else
+        log_error "Element Web服务重启失败"
+        return 1
+    fi
+
+    # 验证修复效果
+    log_info "验证修复效果..."
+    sleep 10
+
+    # 测试Element Web配置
+    local new_base_url=$(kubectl get configmap ess-element-web -n ess -o jsonpath='{.data.config\.json}' | grep -o '"base_url":"[^"]*"' | cut -d'"' -f4 || echo "")
+    if [[ "$new_base_url" == "$expected_base_url" ]]; then
+        log_success "Element Web配置验证成功: $new_base_url"
+    else
+        log_warning "Element Web配置验证失败，当前值: $new_base_url"
+    fi
+
+    log_success "Element Web端口问题修复完成！"
+    log_info "备份文件: $backup_file"
+    log_info "请访问 https://$ELEMENT_WEB_HOST:$EXTERNAL_HTTPS_PORT 测试"
+}
+
 # 统一修复所有ESS端口配置问题
 fix_all_ess_ports() {
     log_info "统一修复所有ESS端口配置问题..."
@@ -1258,6 +1375,14 @@ fix_all_ess_ports() {
     echo "将要修复的问题："
     echo "1. MAS ConfigMap - public_base端口问题"
     echo "2. well-known ConfigMap - server/client端口问题"
+    echo "3. Element Web ConfigMap - base_url端口问题"
+    echo ""
+    echo "使用自定义配置："
+    echo "- 域名: $SERVER_NAME"
+    echo "- 端口: $EXTERNAL_HTTPS_PORT"
+    echo "- Matrix服务器: $SYNAPSE_HOST:$EXTERNAL_HTTPS_PORT"
+    echo "- 认证服务: $MAS_HOST:$EXTERNAL_HTTPS_PORT"
+    echo "- Element Web: $ELEMENT_WEB_HOST:$EXTERNAL_HTTPS_PORT"
     echo ""
 
     read -p "确认开始统一修复? [y/N]: " confirm
@@ -1267,7 +1392,7 @@ fix_all_ess_ports() {
     fi
 
     local success_count=0
-    local total_count=2
+    local total_count=3
 
     # 修复MAS ConfigMap
     echo ""
@@ -1281,12 +1406,22 @@ fix_all_ess_ports() {
 
     # 修复well-known ConfigMap
     echo ""
-    echo -e "${YELLOW}=== 2/2 修复well-known ConfigMap ===${NC}"
+    echo -e "${YELLOW}=== 2/3 修复well-known ConfigMap ===${NC}"
     if fix_ess_wellknown_configmap; then
         ((success_count++))
         log_success "well-known ConfigMap修复成功"
     else
         log_error "well-known ConfigMap修复失败"
+    fi
+
+    # 修复Element Web ConfigMap
+    echo ""
+    echo -e "${YELLOW}=== 3/3 修复Element Web ConfigMap ===${NC}"
+    if fix_element_web_configmap; then
+        ((success_count++))
+        log_success "Element Web ConfigMap修复成功"
+    else
+        log_error "Element Web ConfigMap修复失败"
     fi
 
     # 总结修复结果
@@ -1300,8 +1435,13 @@ fix_all_ess_ports() {
         echo "修复效果："
         echo "✅ MAS服务：所有URL包含端口$EXTERNAL_HTTPS_PORT"
         echo "✅ well-known服务：server/client配置包含正确端口"
+        echo "✅ Element Web：homeserver配置包含正确端口"
         echo "✅ 认证流程：应该能正常工作"
-        echo "✅ 客户端发现：应该能正确连接"
+        echo "✅ 客户端连接：应该能正确访问"
+        echo ""
+        echo "测试访问："
+        echo "- Element Web: https://$ELEMENT_WEB_HOST:$EXTERNAL_HTTPS_PORT"
+        echo "- 认证服务: https://$MAS_HOST:$EXTERNAL_HTTPS_PORT"
     else
         log_warning "部分修复失败，请检查错误信息并手动修复"
     fi
@@ -1632,6 +1772,19 @@ fix_wellknown_configmap_only() {
     read_ess_config
     configure_custom_ports
     fix_ess_wellknown_configmap
+
+    read -p "按任意键返回主菜单..."
+    show_main_menu
+}
+
+# 仅修复Element Web ConfigMap
+fix_element_web_configmap_only() {
+    log_info "仅修复Element Web ConfigMap端口问题..."
+
+    check_system_requirements
+    read_ess_config
+    configure_custom_ports
+    fix_element_web_configmap
 
     read -p "按任意键返回主菜单..."
     show_main_menu

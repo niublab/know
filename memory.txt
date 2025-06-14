@@ -700,12 +700,29 @@ ESS内部服务的配置都硬编码了标准端口，没有考虑自定义端�
 已验证的修复案例：
 ✅ MAS ConfigMap修复：fix_mas_configmap()
 ✅ well-known ConfigMap修复：手动验证成功
+✅ Element Web ConfigMap修复：手动验证成功
+
+Element Web问题验证：
+问题现象：访问https://app.niub.win:8443/显示"Can't connect to homeserver"
+根本原因：Element Web ConfigMap中base_url缺少端口
+- 错误配置："base_url": "https://matrix.niub.win"
+- 正确配置："base_url": "https://matrix.niub.win:8443"
+修复方法：kubectl patch configmap ess-element-web
+修复结果：✅ Element Web正常访问，速度很快
 
 需要标准化的脚本功能：
 - 统一的ESS ConfigMap端口修复函数
 - 自动检测所有需要修复的ConfigMap
 - 批量修复所有端口配置问题
 - 完整的备份和验证机制
+- 支持自定义域名、子域名和端口配置
+
+重要注意事项：
+⚠️ 配置应该支持自定义的域名、子域名和端口
+- 不应硬编码特定域名（如niub.win）
+- 应该从用户配置中读取域名和端口
+- 支持不同的子域名配置（matrix.、mas.、app.、rtc.等）
+- 确保所有URL生成都使用用户指定的自定义配置
 
 这个洞察为解决所有ESS自定义端口问题提供了统一的方法论。
 
