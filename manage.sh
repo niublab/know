@@ -689,35 +689,59 @@ server {
         add_header Cache-Control "public, max-age=3600";
     }
 
-    # 客户端配置发现（保持ESS原始配置）
+    # 客户端配置发现（修复端口问题）
     location /.well-known/matrix/client {
+        # 使用nginx sub_filter模块重写响应，添加端口信息
         proxy_pass http://127.0.0.1:8080;
         proxy_set_header Host \$host;
         proxy_set_header X-Forwarded-For \$remote_addr;
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_set_header X-Forwarded-Port \$server_port;
+
+        # 重写响应内容，添加端口信息
+        sub_filter 'https://matrix.niub.win' 'https://matrix.niub.win:$EXTERNAL_HTTPS_PORT';
+        sub_filter 'https://mas.niub.win' 'https://mas.niub.win:$EXTERNAL_HTTPS_PORT';
+        sub_filter 'https://rtc.niub.win' 'https://rtc.niub.win:$EXTERNAL_HTTPS_PORT';
+        sub_filter_once off;
+        sub_filter_types application/json;
+
         add_header Access-Control-Allow-Origin *;
         add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS";
         add_header Access-Control-Allow-Headers "Origin, X-Requested-With, Content-Type, Accept, Authorization";
     }
 
-    # OpenID Connect 发现文档（MAS认证服务）
+    # OpenID Connect 发现文档（修复端口问题）
     location /.well-known/openid-configuration {
         proxy_pass http://127.0.0.1:8080;
         proxy_set_header Host \$host;
         proxy_set_header X-Forwarded-For \$remote_addr;
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_set_header X-Forwarded-Port \$server_port;
+
+        # 重写响应内容，添加端口信息到所有MAS相关URL
+        sub_filter 'https://mas.niub.win' 'https://mas.niub.win:$EXTERNAL_HTTPS_PORT';
+        sub_filter_once off;
+        sub_filter_types application/json;
+
         add_header Access-Control-Allow-Origin *;
     }
 
-    # 其他 well-known 路径（通用处理）
+    # 其他 well-known 路径（通用处理，修复端口问题）
     location /.well-known/ {
         proxy_pass http://127.0.0.1:8080;
         proxy_set_header Host \$host;
         proxy_set_header X-Forwarded-For \$remote_addr;
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_set_header X-Forwarded-Port \$server_port;
+
+        # 重写响应内容，添加端口信息到所有相关URL
+        sub_filter 'https://matrix.niub.win' 'https://matrix.niub.win:$EXTERNAL_HTTPS_PORT';
+        sub_filter 'https://mas.niub.win' 'https://mas.niub.win:$EXTERNAL_HTTPS_PORT';
+        sub_filter 'https://rtc.niub.win' 'https://rtc.niub.win:$EXTERNAL_HTTPS_PORT';
+        sub_filter 'https://app.niub.win' 'https://app.niub.win:$EXTERNAL_HTTPS_PORT';
+        sub_filter_once off;
+        sub_filter_types application/json text/plain;
+
         add_header Access-Control-Allow-Origin *;
     }
 
