@@ -1,7 +1,8 @@
 ```bash
 # 普通用户运行（推荐）
 bash <(curl -fsSL https://raw.githubusercontent.com/niublab/know/main/setup.sh)
-
+```
+```bash
 # 或者以root用户运行
 sudo bash <(curl -fsSL https://raw.githubusercontent.com/niublab/know/main/setup.sh)
 ```
