@@ -17,7 +17,15 @@ NC='\033[0m' # No Color
 
 # 全局变量
 SCRIPT_VERSION="2.0.0"
-ESS_CONFIG_DIR="/root/ess-config-values"
+SUDO_CMD="sudo"  # 将在check_system_requirements中根据用户类型设置
+
+# 设置配置目录（根据用户类型）
+if [[ $EUID -eq 0 ]]; then
+    ESS_CONFIG_DIR="/root/ess-config-values"
+else
+    ESS_CONFIG_DIR="$HOME/ess-config-values"
+fi
+
 NGINX_CONFIG_DIR="/etc/nginx"
 NGINX_SITES_DIR="/etc/nginx/sites-available"
 NGINX_ENABLED_DIR="/etc/nginx/sites-enabled"
@@ -61,11 +69,18 @@ show_license() {
 # 检查系统要求
 check_system_requirements() {
     log_info "检查系统要求..."
-    
-    # 检查是否为root用户
-    if [[ $EUID -ne 0 ]]; then
-        log_error "此脚本需要root权限运行"
-        exit 1
+
+    # 检查用户权限
+    if [[ $EUID -eq 0 ]]; then
+        log_info "检测到以 root 用户运行"
+        SUDO_CMD=""
+    else
+        if ! sudo -n true 2>/dev/null; then
+            log_error "当前用户没有 sudo 权限，请使用 root 用户或具有 sudo 权限的用户运行"
+            exit 1
+        fi
+        SUDO_CMD="sudo"
+        log_info "检测到普通用户，将使用 sudo 执行特权操作"
     fi
     
     # 检查ESS是否已部署
@@ -184,22 +199,22 @@ configure_custom_ports() {
 # 安装nginx
 install_nginx() {
     log_info "安装nginx..."
-    
+
     # 检查nginx是否已安装
     if command -v nginx >/dev/null 2>&1; then
         log_warning "nginx已安装，跳过安装步骤"
         return 0
     fi
-    
+
     # 更新包列表
-    apt update
-    
+    $SUDO_CMD apt update
+
     # 安装nginx
-    apt install -y nginx
-    
+    $SUDO_CMD apt install -y nginx
+
     # 启用nginx服务
-    systemctl enable nginx
-    
+    $SUDO_CMD systemctl enable nginx
+
     log_success "nginx安装完成"
 }
 
@@ -212,12 +227,12 @@ backup_nginx_config() {
     
     # 备份主要配置文件
     if [[ -f "/etc/nginx/nginx.conf" ]]; then
-        cp "/etc/nginx/nginx.conf" "$backup_dir/"
+        $SUDO_CMD cp "/etc/nginx/nginx.conf" "$backup_dir/"
     fi
-    
+
     # 备份sites-enabled目录
     if [[ -d "/etc/nginx/sites-enabled" ]]; then
-        cp -r "/etc/nginx/sites-enabled" "$backup_dir/"
+        $SUDO_CMD cp -r "/etc/nginx/sites-enabled" "$backup_dir/"
     fi
     
     log_success "nginx配置备份完成: $backup_dir"
@@ -583,7 +598,7 @@ generate_nginx_config() {
     local config_file="$NGINX_SITES_DIR/ess-proxy"
 
     # 创建基于ESS官方推荐的nginx配置
-    cat > "$config_file" <<EOF
+    $SUDO_CMD tee "$config_file" > /dev/null <<EOF
 # ESS Community Nginx 反代配置
 # 生成时间: $(date)
 # 基于ESS官方推荐的外部反代方案
@@ -695,8 +710,8 @@ generate_dhparam() {
     fi
 
     log_info "正在生成2048位DH参数，这可能需要几分钟..."
-    if openssl dhparam -out "$dhparam_file" 2048; then
-        chmod 644 "$dhparam_file"
+    if $SUDO_CMD openssl dhparam -out "$dhparam_file" 2048; then
+        $SUDO_CMD chmod 644 "$dhparam_file"
         log_success "DH参数生成完成"
     else
         log_warning "DH参数生成失败，将在nginx配置中禁用"
@@ -713,7 +728,7 @@ extract_ssl_certificates() {
     local combined_key="$key_dir/ess-combined.key"
 
     # 创建目录
-    mkdir -p "$cert_dir" "$key_dir"
+    $SUDO_CMD mkdir -p "$cert_dir" "$key_dir"
 
     # 提取所有域名的证书并合并
     local domains=("$ELEMENT_WEB_HOST" "$SYNAPSE_HOST" "$MAS_HOST" "$RTC_HOST" "$SERVER_NAME")
@@ -757,8 +772,8 @@ extract_ssl_certificates() {
     fi
 
     # 设置权限
-    chmod 644 "$combined_cert"
-    chmod 600 "$combined_key"
+    $SUDO_CMD chmod 644 "$combined_cert"
+    $SUDO_CMD chmod 600 "$combined_key"
 
     log_success "SSL证书提取完成"
     log_info "证书文件: $combined_cert"
@@ -774,17 +789,17 @@ configure_firewall() {
         log_info "检测到UFW防火墙"
 
         # 开放自定义端口
-        ufw allow "$EXTERNAL_HTTP_PORT/tcp" comment "ESS HTTP"
-        ufw allow "$EXTERNAL_HTTPS_PORT/tcp" comment "ESS HTTPS"
+        $SUDO_CMD ufw allow "$EXTERNAL_HTTP_PORT/tcp" comment "ESS HTTP"
+        $SUDO_CMD ufw allow "$EXTERNAL_HTTPS_PORT/tcp" comment "ESS HTTPS"
 
         log_success "UFW防火墙规则已添加"
     elif command -v firewall-cmd >/dev/null 2>&1; then
         log_info "检测到firewalld防火墙"
 
         # 开放自定义端口
-        firewall-cmd --permanent --add-port="$EXTERNAL_HTTP_PORT/tcp"
-        firewall-cmd --permanent --add-port="$EXTERNAL_HTTPS_PORT/tcp"
-        firewall-cmd --reload
+        $SUDO_CMD firewall-cmd --permanent --add-port="$EXTERNAL_HTTP_PORT/tcp"
+        $SUDO_CMD firewall-cmd --permanent --add-port="$EXTERNAL_HTTPS_PORT/tcp"
+        $SUDO_CMD firewall-cmd --reload
 
         log_success "firewalld防火墙规则已添加"
     else
@@ -808,21 +823,21 @@ full_setup() {
 
     # 启用站点
     log_info "启用nginx站点配置..."
-    ln -sf "$NGINX_SITES_DIR/ess-proxy" "$NGINX_ENABLED_DIR/"
+    $SUDO_CMD ln -sf "$NGINX_SITES_DIR/ess-proxy" "$NGINX_ENABLED_DIR/"
 
     # 禁用默认站点
     if [[ -f "$NGINX_ENABLED_DIR/default" ]]; then
-        rm -f "$NGINX_ENABLED_DIR/default"
+        $SUDO_CMD rm -f "$NGINX_ENABLED_DIR/default"
         log_info "已禁用nginx默认站点"
     fi
 
     # 测试配置
     log_info "测试nginx配置..."
-    if nginx -t; then
+    if $SUDO_CMD nginx -t; then
         log_success "nginx配置测试通过"
 
         # 重载nginx
-        systemctl reload nginx
+        $SUDO_CMD systemctl reload nginx
         log_success "nginx已重载"
 
         # 配置防火墙
