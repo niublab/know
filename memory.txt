@@ -938,4 +938,160 @@ main() {
 
 这个问题的解决为脚本提供了企业级的稳定性。
 
+📋 ESS部署域名申请和配置方法
+----------------------------------------
+
+ESS (Element Server Suite) 部署需要配置多个域名，以下是完整的域名申请和配置流程：
+
+🌐 ESS所需的域名列表：
+1. 服务器主域名 (serverName): example.com
+2. Synapse域名: matrix.example.com
+3. 认证服务域名 (MAS): account.example.com
+4. RTC服务域名: mrtc.example.com
+5. Web客户端域名: chat.example.com
+
+📋 域名申请步骤：
+
+1️⃣ 域名注册商选择：
+推荐注册商：
+- Cloudflare Registrar (推荐，集成度最高)
+- Namecheap
+- GoDaddy
+- 阿里云域名服务
+- 腾讯云域名服务
+
+2️⃣ 域名购买：
+- 购买主域名 (如 example.com)
+- 子域名会自动包含在主域名中
+
+3️⃣ DNS解析配置：
+方案A：使用Cloudflare (推荐)
+- 将域名DNS服务器指向Cloudflare
+- 在Cloudflare添加A记录指向服务器IP
+- 配置子域名解析
+
+方案B：使用域名注册商DNS
+- 在注册商DNS管理中添加A记录
+- 配置所有子域名指向服务器IP
+
+🔧 Cloudflare配置详细步骤：
+
+1️⃣ 添加站点到Cloudflare：
+- 登录 https://dash.cloudflare.com
+- 点击 "Add a Site"
+- 输入主域名 (example.com)
+- 选择免费计划
+- 等待DNS扫描完成
+
+2️⃣ 更改域名服务器：
+- 复制Cloudflare提供的名称服务器
+- 在域名注册商处修改DNS服务器
+- 等待DNS传播 (通常24-48小时)
+
+3️⃣ 配置DNS记录：
+添加以下A记录 (假设服务器IP为 1.2.3.4):
+```
+Type  Name     Content    TTL
+A     @        1.2.3.4    Auto
+A     matrix   1.2.3.4    Auto
+A     account  1.2.3.4    Auto
+A     mrtc     1.2.3.4    Auto
+A     chat     1.2.3.4    Auto
+```
+
+4️⃣ 创建API Token：
+- 访问 https://dash.cloudflare.com/profile/api-tokens
+- 点击 "Create Token"
+- 使用 "Custom token" 模板
+- 权限设置：
+  * Zone:DNS:Edit
+  * Zone:Zone:Read
+- Zone Resources: Include - All zones
+- 复制生成的Token (用于setup.sh脚本)
+
+🛠️ ESS配置文件示例：
+
+hostnames.yaml:
+```yaml
+serverName: example.com
+
+elementWeb:
+  ingress:
+    host: chat.example.com
+
+matrixAuthenticationService:
+  ingress:
+    host: account.example.com
+
+matrixRTC:
+  ingress:
+    host: mrtc.example.com
+
+synapse:
+  ingress:
+    host: matrix.example.com
+```
+
+tls.yaml:
+```yaml
+certManager:
+  clusterIssuer: letsencrypt-prod  # 或 letsencrypt-staging
+```
+
+🔍 域名验证方法：
+
+1️⃣ DNS传播检查：
+```bash
+# 检查DNS解析
+nslookup matrix.example.com
+dig matrix.example.com
+
+# 检查所有子域名
+for subdomain in matrix account mrtc chat; do
+  echo "检查 $subdomain.example.com:"
+  nslookup $subdomain.example.com
+done
+```
+
+2️⃣ SSL证书验证：
+```bash
+# 检查证书状态
+kubectl get certificates -n ess
+
+# 查看证书详情
+kubectl describe certificate <cert-name> -n ess
+```
+
+⚠️ 常见问题和解决方案：
+
+问题1：DNS传播缓慢
+解决：等待24-48小时，或使用DNS传播检查工具
+
+问题2：证书申请失败
+解决：检查Cloudflare API Token权限和DNS记录
+
+问题3：域名解析到错误IP
+解决：检查A记录配置，确保指向正确的服务器IP
+
+问题4：子域名无法访问
+解决：确保所有子域名都有对应的A记录
+
+💡 最佳实践：
+
+1. 使用Cloudflare作为DNS提供商 (免费且功能强大)
+2. 提前申请域名，避免部署时等待DNS传播
+3. 使用有意义的子域名 (如 chat、matrix、account)
+4. 保留API Token的安全性，不要泄露
+5. 定期检查证书过期时间
+6. 备份DNS配置
+
+🎯 部署前检查清单：
+□ 域名已注册并指向Cloudflare
+□ DNS记录已正确配置
+□ Cloudflare API Token已创建
+□ 服务器防火墙已开放80/443端口
+□ 域名解析已生效 (ping测试)
+
+这个流程确保ESS部署时域名配置的完整性和正确性。
+
 ==============================================
