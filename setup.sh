@@ -245,36 +245,126 @@ install_cert_manager() {
     log_success "cert-manager 安装完成"
 }
 
-# 配置 Let's Encrypt ClusterIssuer
-configure_letsencrypt() {
-    log_info "配置 Let's Encrypt ClusterIssuer..."
+# 配置 Cloudflare DNS 验证
+configure_cloudflare_dns() {
+    log_info "配置 Cloudflare DNS 验证..."
 
-    read -p "请输入用于证书申请的邮箱地址: " cert_email
+    echo ""
+    echo -e "${YELLOW}=== Cloudflare API Token 配置指南 ===${NC}"
+    echo "请在 Cloudflare 控制台创建 API Token："
+    echo "1. 访问 https://dash.cloudflare.com/profile/api-tokens"
+    echo "2. 点击 'Create Token'"
+    echo "3. 使用 'Custom token' 模板"
+    echo "4. 权限设置："
+    echo "   - Zone:DNS:Edit"
+    echo "   - Zone:Zone:Read"
+    echo "5. Zone Resources: Include - All zones (或指定您的域名)"
+    echo "6. 复制生成的 Token"
+    echo -e "${YELLOW}=========================================${NC}"
+    echo ""
 
-    if [[ -z "$cert_email" ]]; then
-        log_error "邮箱地址不能为空"
+    read -p "请输入 Cloudflare API Token: " cf_token
+    read -p "请输入证书申请邮箱地址: " cert_email
+
+    echo ""
+    echo "选择证书环境:"
+    echo "1) 生产环境 (Let's Encrypt Production) - 推荐"
+    echo "2) 测试环境 (Let's Encrypt Staging) - 用于测试"
+    read -p "请选择 [1-2]: " cert_env
+
+    # 验证输入
+    if [[ -z "$cf_token" || -z "$cert_email" ]]; then
+        log_error "API Token 和邮箱地址不能为空"
         return 1
     fi
 
+    # 创建 Cloudflare API Token Secret
+    log_info "创建 Cloudflare API Token Secret..."
+    kubectl create secret generic cloudflare-api-token \
+        --from-literal=api-token="$cf_token" \
+        -n cert-manager \
+        --dry-run=client -o yaml | kubectl apply -f -
+
+    # 设置证书环境
+    if [[ "$cert_env" == "2" ]]; then
+        local server="https://acme-staging-v02.api.letsencrypt.org/directory"
+        local issuer_name="letsencrypt-staging"
+        log_info "使用测试环境证书 (Staging)"
+    else
+        local server="https://acme-v02.api.letsencrypt.org/directory"
+        local issuer_name="letsencrypt-prod"
+        log_info "使用生产环境证书 (Production)"
+    fi
+
     # 创建 ClusterIssuer
+    log_info "创建 ClusterIssuer: $issuer_name"
     kubectl apply -f - <<EOF
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
-  name: letsencrypt-prod
+  name: $issuer_name
 spec:
   acme:
-    server: https://acme-v02.api.letsencrypt.org/directory
+    server: $server
     email: $cert_email
     privateKeySecretRef:
-      name: letsencrypt-prod-private-key
+      name: ${issuer_name}-private-key
     solvers:
-      - http01:
-          ingress:
-            class: traefik
+    - dns01:
+        cloudflare:
+          apiTokenSecretRef:
+            name: cloudflare-api-token
+            key: api-token
 EOF
 
-    log_success "Let's Encrypt ClusterIssuer 配置完成"
+    # 更新 TLS 配置文件
+    cat > "$CONFIG_DIR/tls.yaml" <<EOF
+# Copyright 2025 New Vector Ltd
+# SPDX-License-Identifier: AGPL-3.0-only
+
+certManager:
+  clusterIssuer: $issuer_name
+EOF
+
+    log_success "Cloudflare DNS 验证配置完成"
+    log_info "ClusterIssuer: $issuer_name"
+    log_info "验证方式: DNS-01 (Cloudflare)"
+
+    # 可选：验证API Token
+    echo ""
+    read -p "是否验证 API Token 有效性？[y/N]: " verify_token
+    if [[ "$verify_token" =~ ^[Yy]$ ]]; then
+        verify_cloudflare_token "$cf_token"
+    fi
+}
+
+# 验证 Cloudflare API Token
+verify_cloudflare_token() {
+    local token="$1"
+    log_info "验证 Cloudflare API Token..."
+
+    local response=$(curl -s -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify" \
+        -H "Authorization: Bearer $token" \
+        -H "Content-Type: application/json")
+
+    if echo "$response" | grep -q '"success":true'; then
+        log_success "API Token 验证成功"
+
+        # 显示Token权限信息
+        local permissions=$(echo "$response" | grep -o '"permissions":\[[^]]*\]' | head -1)
+        if [[ -n "$permissions" ]]; then
+            log_info "Token 权限已验证"
+        fi
+    else
+        log_warning "API Token 验证失败，请检查Token是否正确"
+        log_warning "如果Token是新创建的，可能需要几分钟生效"
+
+        # 显示错误信息
+        local error_msg=$(echo "$response" | grep -o '"message":"[^"]*"' | head -1)
+        if [[ -n "$error_msg" ]]; then
+            log_warning "错误信息: $error_msg"
+        fi
+    fi
 }
 
 # 创建基础配置文件
@@ -437,7 +527,7 @@ show_main_menu() {
     echo "1) 完整安装 (推荐)"
     echo "2) 检查系统环境"
     echo "3) 安装基础组件 (K3s + Helm + cert-manager)"
-    echo "4) 配置 ESS 部署"
+    echo "4) 配置 ESS 部署 (Cloudflare DNS 证书)"
     echo "5) 部署 ESS Community"
     echo "6) 创建初始用户"
     echo "7) 验证部署"
@@ -476,7 +566,7 @@ show_main_menu() {
 configure_ess() {
     log_info "配置 ESS 部署..."
 
-    configure_letsencrypt
+    configure_cloudflare_dns
     create_basic_config
 
     log_success "ESS 配置完成"
@@ -506,7 +596,7 @@ full_install() {
 
     log_info "基础组件安装完成，开始配置 ESS..."
 
-    configure_letsencrypt
+    configure_cloudflare_dns
     create_basic_config
     deploy_ess
 
@@ -607,9 +697,34 @@ show_status() {
 
     # 检查配置文件
     if [[ -f "$CONFIG_DIR/hostnames.yaml" ]]; then
-        echo -e "配置文件: ${GREEN}已创建${NC}"
+        echo -e "域名配置: ${GREEN}已创建${NC}"
     else
-        echo -e "配置文件: ${RED}未创建${NC}"
+        echo -e "域名配置: ${RED}未创建${NC}"
+    fi
+
+    if [[ -f "$CONFIG_DIR/tls.yaml" ]]; then
+        echo -e "证书配置: ${GREEN}已创建${NC}"
+        local issuer=$(grep "clusterIssuer:" "$CONFIG_DIR/tls.yaml" | awk '{print $2}' 2>/dev/null)
+        if [[ -n "$issuer" ]]; then
+            echo -e "  - ClusterIssuer: $issuer"
+        fi
+    else
+        echo -e "证书配置: ${RED}未创建${NC}"
+    fi
+
+    # 检查 Cloudflare Secret
+    if kubectl get secret cloudflare-api-token -n cert-manager >/dev/null 2>&1; then
+        echo -e "Cloudflare API Token: ${GREEN}已配置${NC}"
+    else
+        echo -e "Cloudflare API Token: ${RED}未配置${NC}"
+    fi
+
+    # 检查 ClusterIssuer
+    local issuers=$(kubectl get clusterissuer 2>/dev/null | grep -E "(letsencrypt-prod|letsencrypt-staging)" | awk '{print $1}' | tr '\n' ' ')
+    if [[ -n "$issuers" ]]; then
+        echo -e "ClusterIssuer: ${GREEN}已创建${NC} ($issuers)"
+    else
+        echo -e "ClusterIssuer: ${RED}未创建${NC}"
     fi
 
     echo ""
