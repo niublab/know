@@ -436,24 +436,67 @@ create_user() {
         return 1
     fi
 
-    # 构建创建用户命令
-    local create_cmd="mas-cli manage register-user --username '$username'"
+    # 构建创建用户命令参数（基于实际的mas-cli命令）
+    local cmd_args=("manage" "register-user")
 
-    if [[ -n "$display_name" ]]; then
-        create_cmd="$create_cmd --display-name '$display_name'"
-    fi
+    # 添加用户名
+    cmd_args+=("$username")
 
+    # 添加密码
+    cmd_args+=("--password" "$password")
+
+    # 添加邮箱（如果提供）
     if [[ -n "$email" ]]; then
-        create_cmd="$create_cmd --email '$email'"
+        cmd_args+=("--email" "$email")
     fi
 
-    create_cmd="$create_cmd --password '$password'"
+    # 添加显示名称（如果提供）
+    if [[ -n "$display_name" ]]; then
+        cmd_args+=("--display-name" "$display_name")
+    fi
 
-    # 执行创建命令
-    if kubectl exec -n ess "$mas_pod" -- sh -c "$create_cmd"; then
-        log_success "用户 '$username' 创建成功"
+    # 添加管理员权限（如果选择）
+    if [[ "$is_admin" == "y" ]]; then
+        cmd_args+=("--admin")
+    fi
+
+    # 添加自动确认标志
+    cmd_args+=("--yes")
+
+    # 执行创建命令（不使用sh，直接执行mas-cli）
+    log_info "执行命令: mas-cli ${cmd_args[*]}"
+
+    if kubectl exec -n ess "$mas_pod" -- mas-cli "${cmd_args[@]}"; then
+        log_success "用户 '$username' 创建成功！"
+        echo ""
+        echo -e "${GREEN}用户信息：${NC}"
+        echo "用户名: $username"
+        if [[ -n "$email" ]]; then
+            echo "邮箱: $email"
+        fi
+        if [[ -n "$display_name" ]]; then
+            echo "显示名称: $display_name"
+        fi
+        echo "管理员: $([ "$is_admin" == "y" ] && echo "是" || echo "否")"
+        echo ""
+        echo -e "${BLUE}用户可以通过以下方式登录：${NC}"
+        echo "1. 访问: https://$MAS_HOST:$EXTERNAL_HTTPS_PORT"
+        echo "2. 使用用户名和密码登录"
+        echo "3. 然后可以访问Element Web: https://$ELEMENT_WEB_HOST:$EXTERNAL_HTTPS_PORT"
     else
         log_error "用户创建失败"
+        echo ""
+        echo -e "${YELLOW}常见问题：${NC}"
+        echo "- 用户名已存在"
+        echo "- 密码不符合复杂度要求"
+        echo "- 邮箱格式不正确或已被使用"
+        echo "- MAS服务状态异常"
+        echo ""
+        echo -e "${BLUE}解决建议：${NC}"
+        echo "1. 检查用户名是否唯一"
+        echo "2. 使用更复杂的密码（建议8位以上，包含字母数字）"
+        echo "3. 检查邮箱格式是否正确"
+        echo "4. 检查MAS服务状态: kubectl get pods -n ess"
     fi
 
     read -p "按任意键返回主菜单..."
@@ -522,13 +565,15 @@ modify_user_permissions() {
 
     echo ""
     echo "请选择权限操作:"
-    echo "1) 设为管理员"
-    echo "2) 取消管理员权限"
-    echo "3) 禁用用户"
-    echo "4) 启用用户"
+    echo "1) 锁定用户 (禁用)"
+    echo "2) 解锁用户 (启用)"
+    echo "3) 设置用户密码"
+    echo "4) 添加邮箱地址"
+    echo "5) 终止用户所有会话"
+    echo "6) 发放兼容性token"
     echo "0) 返回"
     echo ""
-    read -p "请选择 [0-4]: " perm_choice
+    read -p "请选择 [0-6]: " perm_choice
 
     local mas_pod=$(kubectl get pods -n ess -l app.kubernetes.io/name=matrix-authentication-service -o jsonpath='{.items[0].metadata.name}')
 
@@ -541,31 +586,138 @@ modify_user_permissions() {
 
     case $perm_choice in
         1)
-            if kubectl exec -n ess "$mas_pod" -- mas-cli manage set-admin --username "$username"; then
-                log_success "用户 '$username' 已设为管理员"
+            # 锁定用户（基于官方文档）
+            echo ""
+            read -p "是否同时停用用户? [y/N]: " deactivate
+
+            local cmd_args=("manage" "lock-user" "$username")
+            if [[ "$deactivate" =~ ^[Yy]$ ]]; then
+                cmd_args+=("--deactivate")
+            fi
+
+            if kubectl exec -n ess "$mas_pod" -- mas-cli "${cmd_args[@]}"; then
+                log_success "用户 '$username' 已锁定"
+                if [[ "$deactivate" =~ ^[Yy]$ ]]; then
+                    log_info "用户同时已被停用"
+                fi
             else
-                log_error "设置管理员权限失败"
+                log_error "锁定用户失败"
+                echo ""
+                echo -e "${YELLOW}可能的原因：${NC}"
+                echo "- 用户名不存在"
+                echo "- 用户已经被锁定"
+                echo "- MAS服务异常"
             fi
             ;;
         2)
-            if kubectl exec -n ess "$mas_pod" -- mas-cli manage unset-admin --username "$username"; then
-                log_success "用户 '$username' 管理员权限已取消"
+            # 解锁用户
+            if kubectl exec -n ess "$mas_pod" -- mas-cli manage unlock-user "$username"; then
+                log_success "用户 '$username' 已解锁"
             else
-                log_error "取消管理员权限失败"
+                log_error "解锁用户失败"
+                echo ""
+                echo -e "${YELLOW}可能的原因：${NC}"
+                echo "- 用户名不存在"
+                echo "- 用户没有被锁定"
+                echo "- MAS服务异常"
             fi
             ;;
         3)
-            if kubectl exec -n ess "$mas_pod" -- mas-cli manage disable-user --username "$username"; then
-                log_success "用户 '$username' 已禁用"
+            # 设置密码
+            echo ""
+            read -s -p "请输入新密码: " new_password
+            echo ""
+            read -s -p "确认新密码: " confirm_password
+            echo ""
+
+            if [[ "$new_password" != "$confirm_password" ]]; then
+                log_error "密码不匹配"
+                return 1
+            fi
+
+            read -p "是否忽略密码复杂度检查? [y/N]: " ignore_complexity
+
+            local cmd_args=("manage" "set-password" "$username" "$new_password")
+            if [[ "$ignore_complexity" =~ ^[Yy]$ ]]; then
+                cmd_args+=("--ignore-complexity")
+            fi
+
+            if kubectl exec -n ess "$mas_pod" -- mas-cli "${cmd_args[@]}"; then
+                log_success "用户 '$username' 密码设置成功"
             else
-                log_error "禁用用户失败"
+                log_error "设置密码失败"
+                echo ""
+                echo -e "${YELLOW}可能的原因：${NC}"
+                echo "- 用户名不存在"
+                echo "- 密码不符合复杂度要求"
+                echo "- MAS服务异常"
             fi
             ;;
         4)
-            if kubectl exec -n ess "$mas_pod" -- mas-cli manage enable-user --username "$username"; then
-                log_success "用户 '$username' 已启用"
+            # 添加邮箱
+            echo ""
+            read -p "请输入要添加的邮箱地址: " email
+
+            if [[ -z "$email" ]]; then
+                log_error "邮箱地址不能为空"
+                return 1
+            fi
+
+            if kubectl exec -n ess "$mas_pod" -- mas-cli manage add-email "$username" "$email"; then
+                log_success "邮箱 '$email' 已添加到用户 '$username'"
             else
-                log_error "启用用户失败"
+                log_error "添加邮箱失败"
+                echo ""
+                echo -e "${YELLOW}可能的原因：${NC}"
+                echo "- 用户名不存在"
+                echo "- 邮箱格式不正确"
+                echo "- 邮箱已被使用"
+                echo "- MAS服务异常"
+            fi
+            ;;
+        5)
+            # 终止所有会话
+            echo ""
+            log_warning "这将终止用户的所有活动会话，用户需要重新登录"
+            read -p "确认终止用户 '$username' 的所有会话? [y/N]: " confirm_kill
+
+            if [[ "$confirm_kill" =~ ^[Yy]$ ]]; then
+                if kubectl exec -n ess "$mas_pod" -- mas-cli manage kill-sessions "$username"; then
+                    log_success "用户 '$username' 的所有会话已终止"
+                else
+                    log_error "终止会话失败"
+                fi
+            else
+                log_info "操作已取消"
+            fi
+            ;;
+        6)
+            # 发放兼容性token
+            echo ""
+            log_info "兼容性token用于与Synapse的兼容性"
+            read -p "请输入设备ID (留空自动生成): " device_id
+            read -p "是否授予Synapse管理员权限? [y/N]: " grant_admin
+
+            local cmd_args=("manage" "issue-compatibility-token" "$username")
+            if [[ -n "$device_id" ]]; then
+                cmd_args+=("--device-id" "$device_id")
+            fi
+            if [[ "$grant_admin" =~ ^[Yy]$ ]]; then
+                cmd_args+=("--yes-i-want-to-grant-synapse-admin-privileges")
+            fi
+
+            local result=$(kubectl exec -n ess "$mas_pod" -- mas-cli "${cmd_args[@]}" 2>&1)
+
+            if [[ $? -eq 0 ]]; then
+                log_success "兼容性token已发放"
+                echo ""
+                echo -e "${YELLOW}Token信息：${NC}"
+                echo "$result"
+            else
+                log_error "发放兼容性token失败"
+                echo ""
+                echo -e "${YELLOW}错误信息：${NC}"
+                echo "$result"
             fi
             ;;
         0)
@@ -1831,52 +1983,79 @@ generate_registration_link() {
         return 1
     fi
 
-    # 生成注册链接
-    log_info "正在生成注册链接..."
+    # 基于官方最新文档，使用正确的命令
+    log_info "正在生成用户注册token..."
 
-    local cmd="mas-cli manage generate-registration-token"
-    if [[ "$link_type" == "2" ]]; then
-        cmd="$cmd --admin"
-        log_info "生成管理员注册链接..."
-    else
-        log_info "生成普通用户注册链接..."
+    # 构建命令参数
+    local cmd_args=("manage" "issue-user-registration-token")
+
+    # 询问token配置
+    echo ""
+    read -p "设置使用次数限制? (留空表示无限制): " usage_limit
+    if [[ -n "$usage_limit" && "$usage_limit" =~ ^[0-9]+$ ]]; then
+        cmd_args+=("--usage-limit" "$usage_limit")
     fi
 
-    local result=$(kubectl exec -n ess "$mas_pod" -- $cmd 2>/dev/null)
+    read -p "设置过期时间(秒)? (留空表示永不过期): " expires_in
+    if [[ -n "$expires_in" && "$expires_in" =~ ^[0-9]+$ ]]; then
+        cmd_args+=("--expires-in" "$expires_in")
+    fi
+
+    # 执行命令生成token
+    local result=$(kubectl exec -n ess "$mas_pod" -- mas-cli "${cmd_args[@]}" 2>&1)
 
     if [[ $? -eq 0 && -n "$result" ]]; then
-        local token=$(echo "$result" | grep -o 'token: [a-zA-Z0-9_-]*' | cut -d' ' -f2)
+        # 从输出中提取token
+        local token=$(echo "$result" | grep -o '[a-zA-Z0-9_-]\{20,\}' | head -1)
+
         if [[ -n "$token" ]]; then
             local registration_url="https://$MAS_HOST:$EXTERNAL_HTTPS_PORT/register?token=$token"
 
             echo ""
             echo -e "${GREEN}================================${NC}"
-            echo -e "${GREEN}注册链接生成成功！${NC}"
+            echo -e "${GREEN}注册token生成成功！${NC}"
             echo -e "${GREEN}================================${NC}"
             echo ""
-            if [[ "$link_type" == "2" ]]; then
-                echo -e "${YELLOW}管理员注册链接：${NC}"
-            else
-                echo -e "${YELLOW}普通用户注册链接：${NC}"
-            fi
+            echo -e "${YELLOW}注册链接：${NC}"
             echo "$registration_url"
             echo ""
-            echo -e "${BLUE}使用说明：${NC}"
-            echo "1. 将此链接发送给需要注册的用户"
-            echo "2. 用户点击链接即可直接注册账户"
-            if [[ "$link_type" == "2" ]]; then
-                echo "3. 通过此链接注册的用户将自动获得管理员权限"
+            echo -e "${YELLOW}Token信息：${NC}"
+            echo "Token: $token"
+            if [[ -n "$usage_limit" ]]; then
+                echo "使用次数限制: $usage_limit 次"
+            else
+                echo "使用次数: 无限制"
             fi
-            echo "4. 每个链接只能使用一次"
+            if [[ -n "$expires_in" ]]; then
+                echo "过期时间: $expires_in 秒后"
+            else
+                echo "过期时间: 永不过期"
+            fi
+            echo ""
+            echo -e "${BLUE}使用说明：${NC}"
+            echo "1. 将注册链接发送给需要注册的用户"
+            echo "2. 用户点击链接即可注册账户"
+            echo "3. 每个token根据设置可使用指定次数"
+            echo "4. 注册的用户为普通用户权限"
             echo ""
             echo -e "${YELLOW}注意：请妥善保管此链接，避免泄露${NC}"
             echo -e "${GREEN}================================${NC}"
         else
-            log_error "无法解析注册token"
+            log_error "无法从输出中提取token"
+            echo ""
+            echo -e "${YELLOW}命令输出：${NC}"
+            echo "$result"
         fi
     else
-        log_error "生成注册链接失败"
-        log_info "请检查MAS服务状态"
+        log_error "生成注册token失败"
+        echo ""
+        echo -e "${YELLOW}错误信息：${NC}"
+        echo "$result"
+        echo ""
+        echo -e "${BLUE}可能的原因：${NC}"
+        echo "- MAS服务状态异常"
+        echo "- 配置文件问题"
+        echo "- 权限不足"
     fi
 
     read -p "按任意键返回主菜单..."
@@ -1904,41 +2083,45 @@ list_users() {
     # 获取用户列表
     log_info "正在获取用户列表..."
 
-    # 使用MAS CLI获取用户信息
-    local users_output=$(kubectl exec -n ess "$mas_pod" -- mas-cli manage list-users 2>/dev/null)
+    # 基于实际情况，MAS CLI没有list-users命令，直接尝试数据库查询
+    log_info "MAS CLI不支持list-users命令，尝试从数据库获取用户信息..."
 
-    if [[ $? -eq 0 && -n "$users_output" ]]; then
-        echo "$users_output"
-    else
-        # 如果MAS CLI不支持list-users，尝试其他方法
-        log_warning "无法通过MAS CLI获取用户列表"
-        log_info "尝试从数据库获取用户信息..."
+    # 获取Postgres Pod
+    local postgres_pod=$(kubectl get pods -n ess -l app.kubernetes.io/name=postgres -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
 
-        # 获取Postgres Pod
-        local postgres_pod=$(kubectl get pods -n ess -l app.kubernetes.io/name=postgres -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    if [[ -n "$postgres_pod" ]]; then
+        echo ""
+        echo -e "${YELLOW}从数据库获取的用户信息：${NC}"
 
-        if [[ -n "$postgres_pod" ]]; then
+        # 查询用户表（基于实际的数据库结构）
+        local db_query="SELECT username, display_name, email, created_at, locked_at IS NOT NULL as is_locked FROM users ORDER BY created_at;"
+
+        if kubectl exec -n ess "$postgres_pod" -- psql -U postgres -d matrixauthenticationservice -c "$db_query" 2>/dev/null; then
             echo ""
-            echo -e "${YELLOW}从数据库获取的用户信息：${NC}"
-
-            # 查询用户表
-            local db_query="SELECT username, display_name, email, created_at, locked_at IS NOT NULL as is_locked FROM users ORDER BY created_at;"
-
-            kubectl exec -n ess "$postgres_pod" -- psql -U postgres -d matrixauthenticationservice -c "$db_query" 2>/dev/null || {
-                log_warning "无法连接到数据库"
-                echo ""
-                echo -e "${YELLOW}可用的用户管理操作：${NC}"
-                echo "- 创建新用户: 选择菜单选项 2"
-                echo "- 修改用户权限: 选择菜单选项 3"
-                echo "- 生成注册链接: 选择菜单选项 4"
-            }
+            echo -e "${GREEN}用户列表获取成功${NC}"
         else
-            log_warning "无法找到数据库Pod"
+            log_warning "无法连接到数据库或查询失败"
             echo ""
-            echo -e "${YELLOW}建议的操作：${NC}"
-            echo "1. 检查ESS服务状态: kubectl get pods -n ess"
-            echo "2. 使用其他用户管理功能创建和管理用户"
+            echo -e "${YELLOW}可能的原因：${NC}"
+            echo "- 数据库连接失败"
+            echo "- 数据库名称或表结构不匹配"
+            echo "- 权限不足"
+            echo ""
+            echo -e "${BLUE}替代方案：${NC}"
+            echo "1. 检查数据库状态: kubectl get pods -n ess | grep postgres"
+            echo "2. 查看数据库日志: kubectl logs -n ess <postgres-pod>"
+            echo "3. 使用其他用户管理功能"
         fi
+    else
+        log_warning "无法找到PostgreSQL数据库Pod"
+        echo ""
+        echo -e "${YELLOW}检查数据库状态：${NC}"
+        kubectl get pods -n ess | grep -E "(postgres|database)" || echo "未找到数据库相关Pod"
+        echo ""
+        echo -e "${BLUE}建议的操作：${NC}"
+        echo "1. 检查ESS服务状态: kubectl get pods -n ess"
+        echo "2. 确认数据库服务是否正常运行"
+        echo "3. 使用其他用户管理功能创建和管理用户"
     fi
 
     echo ""
