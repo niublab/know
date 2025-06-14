@@ -223,4 +223,253 @@ wellKnownDelegation:
 优先级：最高（严重bug）
 状态：需要立即修复
 
+问题9：开发原则违反警告
+--------------------
+重要原则：
+- 绝不能靠想象、推测等方法开发功能
+- 必须基于官方文档、实际测试、确凿事实
+- 所有功能实现必须有官方依据或实际验证
+
+当前问题：
+- 正在为manage.sh添加用户管理功能
+- 但没有验证MAS CLI的实际命令和参数
+- 可能基于推测编写了不存在的命令
+
+解决方案：
+1. 先查找MAS CLI官方文档
+2. 实际测试MAS CLI可用命令
+3. 验证每个功能的实际可行性
+4. 基于事实编写功能代码
+
+优先级：最高（开发原则）
+状态：需要立即纠正开发方式
+
+问题10：MAS CLI实际可用命令确认
+----------------------------
+经过实际测试，MAS CLI的真实可用命令：
+
+主命令：
+- config: 配置相关命令
+- database: 管理数据库
+- server: 运行web服务器
+- worker: 运行worker
+- manage: 管理实例 ⭐
+- templates: 模板相关命令
+- doctor: 运行部署诊断
+- syn2mas: 从Synapse内置认证迁移到MAS
+
+manage子命令（用户管理）：
+- add-email: 为指定用户添加邮箱地址
+- verify-email: (已弃用) 标记邮箱为已验证
+- set-password: 设置用户密码
+- issue-compatibility-token: 发布兼容性token
+- provision-all-users: 为所有用户触发provisioning任务
+- kill-sessions: 终止用户的所有会话
+- lock-user: 锁定用户
+- unlock-user: 解锁用户
+- register-user: 注册用户 ⭐
+
+重要发现：
+- ✅ register-user: 可以创建用户
+- ✅ lock-user/unlock-user: 可以禁用/启用用户
+- ✅ set-password: 可以修改密码
+- ❌ 没有delete-user命令
+- ❌ 没有set-admin/unset-admin命令
+
+需要进一步验证的命令参数和用法。
+
+问题11：MAS CLI具体命令参数确认
+-----------------------------
+经过实际测试，关键命令的具体用法：
+
+1. register-user 命令：
+   用法: mas-cli manage register-user [OPTIONS] [USERNAME]
+   主要参数:
+   - -p, --password <PASSWORD>: 设置密码
+   - -e, --email <EMAILS>: 添加邮箱
+   - -d, --display-name <DISPLAY_NAME>: 设置显示名
+   - -a, --admin: 设为管理员 ⭐
+   - -A, --no-admin: 设为非管理员
+   - -y, --yes: 非交互模式
+   - --ignore-password-complexity: 忽略密码复杂度
+
+2. lock-user 命令：
+   用法: mas-cli manage lock-user [OPTIONS] <USERNAME>
+   参数:
+   - <USERNAME>: 必需，要锁定的用户名
+   - --deactivate: 是否停用用户
+
+3. set-password 命令：
+   用法: mas-cli manage set-password [OPTIONS] <USERNAME> <PASSWORD>
+   参数:
+   - <USERNAME>: 必需，用户名
+   - <PASSWORD>: 必需，新密码
+   - --ignore-complexity: 忽略密码复杂度
+
+重要发现：
+- ✅ register-user支持--admin参数，可以创建管理员
+- ✅ 所有命令都支持非交互模式
+- ✅ 可以通过脚本自动化执行
+- ❌ 仍然没有delete-user命令
+
+基于这些实际命令，可以安全地实现用户管理功能。
+
+问题12：非标准端口的URL生成问题（关键技术难点）
+----------------------------------------
+实际发现的问题：
+ESS内部生成的URL都使用标准端口，不包含自定义端口信息
+
+具体表现：
+1. well-known客户端配置：
+   - "base_url": "https://matrix.niub.win" (无端口)
+   - "account": "https://mas.niub.win/account" (无端口)
+   - "issuer": "https://mas.niub.win/" (无端口)
+
+2. well-known服务器配置：
+   - "m.server": "matrix.niub.win:443" (标准端口)
+
+3. MAS页面链接：
+   - OpenID配置: "https://mas.niub.win/.well-known/openid-configuration" (无端口)
+   - 登录链接: "/login" (相对路径，会继承当前端口)
+
+问题影响：
+- 外部访问需要自定义端口 (如9443)
+- 但ESS生成的链接都是标准端口
+- 可能导致客户端无法正确连接
+
+需要验证的解决方案：
+- 方案A：修改ESS内部配置 (需要查找官方文档)
+- 方案B：nginx URL重写 (需要验证技术可行性)
+- 方案C：DNS/网络层解决 (需要评估复杂度)
+
+优先级：最高（影响外部访问）
+状态：需要查找官方解决方案
+
+问题13：反代和URL重定向相关配置要点
+-------------------------------
+需要系统性查找和确认的官方资料：
+
+1. ESS官方反代配置：
+   - ESS-helm项目中有反代配置示例
+   - 需要获取官方推荐的nginx配置
+   - 确认是否有遗漏的配置项
+
+2. Matrix协议相关：
+   - Well-known delegation配置
+   - 联邦流量处理
+   - 客户端发现机制
+
+3. 可能遗漏的配置点：
+   - WebSocket连接处理
+   - 文件上传/下载配置
+   - 媒体代理设置
+   - CORS头配置
+   - 安全头设置
+   - 超时配置
+   - 缓冲区配置
+
+4. URL重定向相关：
+   - HTTP到HTTPS重定向
+   - 端口重定向处理
+   - 路径重写规则
+   - 查询参数处理
+
+5. 特殊端点处理：
+   - /.well-known/* 路径
+   - /_matrix/* API路径
+   - /_synapse/* 管理路径
+   - /health 健康检查
+   - 静态资源路径
+
+需要确认的技术细节：
+- 是否需要特殊的代理头设置
+- 是否有特定的nginx模块要求
+- 是否需要处理特殊的Matrix协议要求
+
+优先级：最高
+状态：需要获取完整的官方配置示例
+
+问题14：ESS官方nginx反代配置完整示例
+--------------------------------
+从ESS官方README获得的完整nginx配置：
+
+官方nginx配置示例：
+```nginx
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+
+    access_log /var/log/nginx/ess.log main;
+    error_log /var/log/nginx/ess.errors;
+
+    # SSL配置
+    ssl_certificate /etc/nginx/certs/certificate.full;
+    ssl_certificate_key /etc/nginx/certs/certificate.key;
+    ssl_protocols TLSv1.2 TLSv1.3;  # TLSv1.2 required for iOS
+    ssl_dhparam /etc/nginx/dhparam.pem;
+    ssl_session_cache shared:le_nginx_SSL:10m;
+    ssl_session_timeout 1440m;
+    ssl_session_tickets off;
+    ssl_buffer_size 4k;
+    ssl_stapling on;
+    ssl_stapling_verify on;
+
+    # 安全头
+    add_header Strict-Transport-Security 'max-age=31536000; includeSubDomains; preload' always;
+
+    # SSL密码套件
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384:DHE-RSA-CHACHA20-POLY1305;
+    ssl_prefer_server_ciphers on;
+
+    server_name chat.example.com matrix.example.com account.example.com mrtc.example.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;  # 反代到Traefik HTTP端口
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Host $host;
+
+        # 文件上传限制
+        client_max_body_size 50M;
+
+        # WebSocket支持
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        # 超时配置
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+
+        # 禁用缓冲
+        proxy_buffering off;
+    }
+}
+
+# HTTP重定向到HTTPS
+server {
+    listen 80;
+    listen [::]:80;
+    server_name chat.example.com matrix.example.com account.example.com mrtc.example.com;
+    return 301 https://$host$request_uri;
+}
+```
+
+关键发现：
+1. ✅ 反代到127.0.0.1:8080 (Traefik HTTP端口)
+2. ✅ 完整的SSL配置和安全头
+3. ✅ WebSocket支持配置
+4. ✅ 文件上传限制 (50M)
+5. ✅ 超时配置 (86400s)
+6. ✅ 禁用缓冲 (proxy_buffering off)
+7. ✅ IPv6支持
+8. ✅ HTTP到HTTPS重定向
+
+端口信息：
+- Traefik默认端口: 8080 (HTTP), 8443 (HTTPS)
+- WebRTC端口: TCP 30881, UDP 30882
+
+优先级：最高
+状态：已获得官方完整配置，可以实施
+
 ==============================================
