@@ -251,61 +251,37 @@ show_main_menu() {
     echo "请选择功能模块:"
     echo ""
     echo -e "${GREEN}=== nginx反代管理 ===${NC}"
-    echo "1) 完整配置nginx反代 (推荐)"
-    echo "2) 仅安装nginx"
-    echo "3) 配置自定义端口"
-    echo "4) 生成nginx配置"
-    echo "5) 测试nginx配置"
+    echo "1) 完整配置nginx反代 (推荐 - 一键修复所有问题)"
     echo ""
     echo -e "${GREEN}=== 用户管理 ===${NC}"
-    echo "6) 创建新用户"
-    echo "7) 删除用户"
-    echo "8) 修改用户权限"
-    echo "9) 生成注册链接"
-    echo "10) 查看用户列表"
-    echo ""
-    echo -e "${GREEN}=== ESS配置管理 ===${NC}"
-    echo "11) 修复所有ESS端口配置问题 (推荐)"
-    echo "12) 修复MAS ConfigMap端口问题"
-    echo "13) 修复well-known ConfigMap端口问题"
-    echo "14) 修复Element Web ConfigMap端口问题"
-    echo "15) 生成ESS外部URL配置"
-    echo "16) 应用ESS外部URL配置"
+    echo "2) 创建新用户"
+    echo "3) 修改用户权限"
+    echo "4) 生成注册链接"
+    echo "5) 查看用户列表"
     echo ""
     echo -e "${GREEN}=== 系统管理 ===${NC}"
-    echo "17) 查看系统状态"
-    echo "18) 查看服务日志"
-    echo "19) 重启服务"
-    echo "20) 备份配置"
+    echo "6) 查看系统状态"
+    echo "7) 查看服务日志"
+    echo "8) 重启服务"
+    echo "9) 备份配置"
     echo ""
     echo "0) 退出"
     echo ""
-    read -p "请输入选择 [0-20]: " choice
+    read -p "请输入选择 [0-9]: " choice
 
     case $choice in
         1) full_setup ;;
-        2) install_nginx_only ;;
-        3) configure_ports_only ;;
-        4) generate_config_only ;;
-        5) test_config ;;
-        6) create_user ;;
-        7) delete_user ;;
-        8) modify_user_permissions ;;
-        9) generate_registration_link ;;
-        10) list_users ;;
-        11) fix_all_ess_ports_only ;;
-        12) fix_mas_configmap_only ;;
-        13) fix_wellknown_configmap_only ;;
-        14) fix_element_web_configmap_only ;;
-        15) generate_ess_config_only ;;
-        16) apply_ess_config_only ;;
-        17) show_status ;;
-        18) show_logs ;;
-        19) restart_services ;;
-        20) backup_config ;;
+        2) create_user ;;
+        3) modify_user_permissions ;;
+        4) generate_registration_link ;;
+        5) list_users ;;
+        6) show_status ;;
+        7) show_logs ;;
+        8) restart_services ;;
+        9) backup_config ;;
         0) exit 0 ;;
         *)
-            log_error "无效选择"
+            log_error "无效选择，请输入有效选项 [0-9]"
             sleep 2
             show_main_menu
             ;;
