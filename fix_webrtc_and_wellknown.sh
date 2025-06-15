@@ -218,12 +218,121 @@ else
     echo "- nginx配置中的server_name设置"
 fi
 
+# 9. 针对具体问题的修复
 echo ""
-echo -e "${BLUE}=== 总结 ===${NC}"
-echo "WebRTC端口: $tcp_final (TCP) / $udp_final (UDP)"
-echo "app.niub.win: HTTP $app_status"
+log_info "9. 针对具体问题的修复..."
 echo ""
-echo "如果问题仍然存在，建议："
-echo "1. 检查ESS部署的Matrix RTC配置"
-echo "2. 重新运行完整配置脚本"
-echo "3. 检查DNS和SSL证书配置"
+
+# 修复WebRTC端口问题（Kubernetes网络问题）
+if [[ "$tcp_final" == "未监听" || "$udp_final" == "未监听" ]]; then
+    echo -e "${YELLOW}检测到WebRTC端口未监听，尝试修复Kubernetes网络问题...${NC}"
+
+    read -p "是否重启kube-proxy和kubelet以修复端口问题? [y/N]: " fix_k8s
+    if [[ "$fix_k8s" =~ ^[Yy]$ ]]; then
+        echo ""
+        log_info "重启kube-proxy..."
+        systemctl restart kube-proxy 2>/dev/null || echo "kube-proxy重启失败或不存在"
+
+        log_info "重启kubelet..."
+        systemctl restart kubelet 2>/dev/null || echo "kubelet重启失败或不存在"
+
+        log_info "等待服务重启..."
+        sleep 30
+
+        echo "重启后端口状态："
+        echo "TCP 30881: $(netstat -tlnp 2>/dev/null | grep :30881 && echo '监听中' || echo '未监听')"
+        echo "UDP 30882: $(netstat -ulnp 2>/dev/null | grep :30882 && echo '监听中' || echo '未监听')"
+        echo ""
+    fi
+fi
+
+# 修复nginx域名配置问题
+app_status_check=$(curl -k -s -o /dev/null -w "%{http_code}" "https://app.niub.win:8443/.well-known/matrix/client" 2>/dev/null || echo "000")
+if [[ "$app_status_check" != "200" ]]; then
+    echo -e "${YELLOW}检测到app.niub.win返回404，检查nginx配置...${NC}"
+
+    echo "当前nginx server_name配置："
+    grep "server_name" /etc/nginx/sites-available/ess-proxy 2>/dev/null || echo "配置文件不存在"
+    echo ""
+
+    echo "nginx错误日志（最近10行）："
+    tail -10 /var/log/nginx/error.log 2>/dev/null || echo "无法读取错误日志"
+    echo ""
+
+    read -p "是否修复nginx配置中的域名问题? [y/N]: " fix_nginx_domains
+    if [[ "$fix_nginx_domains" =~ ^[Yy]$ ]]; then
+        echo ""
+        log_info "修复nginx配置..."
+
+        # 检查配置文件是否包含所有必要的域名
+        config_file="/etc/nginx/sites-available/ess-proxy"
+        if [[ -f "$config_file" ]]; then
+            # 备份配置
+            cp "$config_file" "${config_file}.backup.$(date +%Y%m%d-%H%M%S)"
+
+            # 确保server_name包含所有域名
+            sed -i 's/server_name .*/server_name app.niub.win matrix.niub.win mas.niub.win rtc.niub.win niub.win;/' "$config_file"
+
+            log_info "重新加载nginx配置..."
+            nginx -t && systemctl reload nginx
+
+            sleep 5
+            echo "修复后app.niub.win状态："
+            curl -k -I https://app.niub.win:8443/.well-known/matrix/client 2>/dev/null | head -1
+        else
+            echo "nginx配置文件不存在，需要重新生成配置"
+        fi
+    fi
+fi
+
+echo ""
+echo -e "${BLUE}=== 最终总结 ===${NC}"
+
+# 最终检查
+final_tcp=$(netstat -tlnp 2>/dev/null | grep :30881 && echo "监听中" || echo "未监听")
+final_udp=$(netstat -ulnp 2>/dev/null | grep :30882 && echo "监听中" || echo "未监听")
+final_app=$(curl -k -s -o /dev/null -w "%{http_code}" "https://app.niub.win:8443/.well-known/matrix/client" 2>/dev/null || echo "000")
+
+echo "WebRTC端口: $final_tcp (TCP) / $final_udp (UDP)"
+echo "app.niub.win: HTTP $final_app"
+echo ""
+
+if [[ "$final_tcp" == "监听中" && "$final_udp" == "监听中" && "$final_app" == "200" ]]; then
+    echo -e "${GREEN}🎉 所有问题已修复！Element Call应该可以正常工作了。${NC}"
+    echo ""
+    echo "测试步骤："
+    echo "1. 清除浏览器缓存"
+    echo "2. 访问: https://app.niub.win:8443"
+    echo "3. 登录并创建房间"
+    echo "4. 测试Element Call视频通话"
+else
+    echo -e "${YELLOW}⚠️  仍有问题需要解决：${NC}"
+
+    if [[ "$final_tcp" != "监听中" || "$final_udp" != "监听中" ]]; then
+        echo ""
+        echo -e "${RED}WebRTC端口问题：${NC}"
+        echo "可能的原因："
+        echo "1. Kubernetes集群网络配置问题"
+        echo "2. 防火墙或iptables规则问题"
+        echo "3. ESS部署的NodePort配置问题"
+        echo ""
+        echo "建议检查："
+        echo "- iptables -t nat -L | grep 3088"
+        echo "- kubectl describe svc ess-matrix-rtc-sfu-tcp -n ess"
+        echo "- systemctl status kube-proxy"
+    fi
+
+    if [[ "$final_app" != "200" ]]; then
+        echo ""
+        echo -e "${RED}nginx配置问题：${NC}"
+        echo "可能的原因："
+        echo "1. server_name配置不完整"
+        echo "2. SSL证书不包含app.niub.win"
+        echo "3. DNS解析问题"
+        echo ""
+        echo "建议检查："
+        echo "- nslookup app.niub.win"
+        echo "- openssl s_client -connect app.niub.win:8443 -servername app.niub.win"
+        echo "- 重新运行完整配置脚本"
+    fi
+fi
