@@ -606,9 +606,13 @@ fix_ess_internal_configs() {
     log_success "ESS内部配置修复完成"
 }
 
-# 修复MAS ConfigMap
+# 修复MAS ConfigMap（符合ESS官方规范）
 fix_mas_configmap() {
-    log_info "修复MAS ConfigMap中的端口配置..."
+    log_info "修复MAS ConfigMap中的端口配置（基于ESS官方规范）..."
+
+    # 警告：直接修改ConfigMap可能被Helm覆盖
+    log_warning "注意：直接修改ConfigMap可能在下次Helm upgrade时被覆盖"
+    log_info "推荐方法是通过Helm values配置"
 
     # 获取当前MAS配置
     local current_public_base=$(kubectl get configmap ess-matrix-authentication-service -n ess -o jsonpath='{.data.config\.yaml}' 2>/dev/null | grep "public_base:" | awk '{print $2}' || echo "")
@@ -632,6 +636,18 @@ fix_mas_configmap() {
     log_info "当前值: $current_public_base"
     log_info "期望值: $expected_public_base"
 
+    echo ""
+    read -p "是否继续修改ConfigMap? (推荐通过Helm values配置) [y/N]: " confirm || confirm=""
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        log_info "跳过MAS ConfigMap修复"
+        echo ""
+        echo "推荐的配置方法："
+        echo "1. 创建自定义values.yaml文件"
+        echo "2. 配置matrix-authentication-service.config.public_base"
+        echo "3. 使用helm upgrade应用配置"
+        return 0
+    fi
+
     # 备份当前ConfigMap
     local backup_file="$ESS_CONFIG_DIR/mas-configmap-backup-$(date +%Y%m%d-%H%M%S).yaml"
     $SUDO_CMD mkdir -p "$ESS_CONFIG_DIR"
@@ -641,7 +657,7 @@ fix_mas_configmap() {
         log_warning "ConfigMap备份失败"
     fi
 
-    # 修复配置
+    # 修复配置（保持ESS官方配置结构）
     log_info "正在修复MAS public_base配置..."
     local config_yaml=$(kubectl get configmap ess-matrix-authentication-service -n ess -o jsonpath='{.data.config\.yaml}')
     local fixed_config=$(echo "$config_yaml" | sed "s|public_base:.*|public_base: $expected_public_base|")
@@ -652,6 +668,11 @@ fix_mas_configmap() {
         # 重启MAS服务
         kubectl rollout restart deployment ess-matrix-authentication-service -n ess
         log_info "MAS服务已重启"
+
+        echo ""
+        log_warning "重要提醒："
+        echo "• 此修改可能在下次Helm upgrade时被覆盖"
+        echo "• 建议将配置添加到Helm values中以持久化"
     else
         log_error "MAS ConfigMap修复失败"
         return 1
@@ -946,9 +967,9 @@ get_correct_external_ip() {
     return 1
 }
 
-# 修复LiveKit外部IP配置
+# 修复LiveKit外部IP配置（符合ESS官方规范）
 fix_livekit_external_ip() {
-    log_info "修复LiveKit外部IP配置..."
+    log_info "修复LiveKit外部IP配置（基于ESS官方规范）..."
 
     # 获取正确的外部IP
     local correct_ip=$(get_correct_external_ip)
@@ -959,31 +980,119 @@ fix_livekit_external_ip() {
 
     log_info "将配置LiveKit使用外部IP: $correct_ip"
 
-    # 获取当前的Matrix RTC ConfigMap
+    # 首先检查ESS官方配置结构
+    log_info "检查ESS官方配置结构..."
+
+    # 检查当前的Matrix RTC ConfigMap结构
     local configmap_name="ess-matrix-rtc-sfu"
+
+    # 获取当前ConfigMap的所有数据键
+    local config_keys=$(kubectl get configmap "$configmap_name" -n ess -o jsonpath='{.data}' 2>/dev/null | jq -r 'keys[]' 2>/dev/null || echo "")
+
+    echo "当前ConfigMap包含的配置文件："
+    echo "$config_keys"
 
     # 备份当前配置
     local backup_file="/tmp/matrix-rtc-configmap-backup-$(date +%Y%m%d-%H%M%S).yaml"
     kubectl get configmap "$configmap_name" -n ess -o yaml > "$backup_file" 2>/dev/null
     log_info "ConfigMap备份到: $backup_file"
 
-    # 创建新的配置，明确指定外部IP
-    local new_config="rtc:
+    # 检查ESS官方推荐的配置方法
+    log_info "检查ESS官方配置方法..."
+
+    # 方法1：通过Helm values配置（推荐）
+    log_info "尝试通过Helm values配置外部IP..."
+
+    # 获取当前Helm values
+    local current_values=$(helm get values ess -n ess -o yaml 2>/dev/null || echo "")
+
+    if [[ -n "$current_values" ]]; then
+        echo "当前Helm values配置："
+        echo "$current_values" | grep -A 10 -B 5 "matrix-rtc" || echo "未找到matrix-rtc配置"
+
+        # 创建临时values文件
+        local temp_values="/tmp/ess-values-$(date +%Y%m%d-%H%M%S).yaml"
+
+        # 基于ESS官方规范创建values配置
+        cat > "$temp_values" <<EOF
+matrix-rtc:
+  sfu:
+    config:
+      rtc:
+        use_external_ip: true
+        external_ip: "$correct_ip"
+        tcp_port: 30881
+        udp_port: 30882
+      port: 7880
+      prometheus_port: 6789
+      logging:
+        level: info
+        json: false
+        pion_level: error
+      turn:
+        enabled: false
+EOF
+
+        log_info "尝试通过Helm upgrade更新配置..."
+        if helm upgrade ess oci://ghcr.io/element-hq/ess-helm/ess-community -n ess -f "$temp_values" --reuse-values; then
+            log_success "通过Helm成功更新LiveKit外部IP配置"
+
+            # 等待部署完成
+            kubectl rollout status deployment ess-matrix-rtc-sfu -n ess --timeout=300s
+            kubectl rollout status deployment ess-matrix-rtc-authorisation-service -n ess --timeout=300s
+
+            # 清理临时文件
+            rm -f "$temp_values"
+
+            log_success "LiveKit外部IP配置修复完成（通过Helm）"
+            return 0
+        else
+            log_warning "Helm upgrade失败，尝试直接修改ConfigMap..."
+            rm -f "$temp_values"
+        fi
+    fi
+
+    # 方法2：直接修改ConfigMap（备用方法）
+    log_warning "使用备用方法：直接修改ConfigMap"
+    log_warning "注意：此方法可能在下次Helm upgrade时被覆盖"
+
+    # 检查现有的配置文件结构
+    if kubectl get configmap "$configmap_name" -n ess -o jsonpath='{.data.config-underrides\.yaml}' >/dev/null 2>&1; then
+        # 使用config-underrides.yaml
+        local config_key="config-underrides.yaml"
+    elif kubectl get configmap "$configmap_name" -n ess -o jsonpath='{.data.config\.yaml}' >/dev/null 2>&1; then
+        # 使用config.yaml
+        local config_key="config.yaml"
+    else
+        log_error "无法确定正确的配置文件键名"
+        return 1
+    fi
+
+    log_info "使用配置键: $config_key"
+
+    # 获取当前配置
+    local current_config=$(kubectl get configmap "$configmap_name" -n ess -o jsonpath="{.data.$config_key}" 2>/dev/null || echo "")
+
+    # 创建新配置（保持原有配置，只修改外部IP部分）
+    local new_config
+    if echo "$current_config" | grep -q "external_ip:"; then
+        # 替换现有的external_ip配置
+        new_config=$(echo "$current_config" | sed "s/external_ip:.*/external_ip: $correct_ip/")
+    else
+        # 添加external_ip配置
+        if echo "$current_config" | grep -q "use_external_ip: true"; then
+            new_config=$(echo "$current_config" | sed "/use_external_ip: true/a\\  external_ip: $correct_ip")
+        else
+            # 添加完整的rtc配置
+            new_config="$current_config
+rtc:
   use_external_ip: true
-  external_ip: $correct_ip
-  tcp_port: 30881
-  udp_port: 30882
-port: 7880
-prometheus_port: 6789
-logging:
-  level: info
-  json: false
-  pion_level: error
-turn:
-  enabled: false"
+  external_ip: $correct_ip"
+        fi
+    fi
 
     # 更新ConfigMap
-    if kubectl patch configmap "$configmap_name" -n ess --type merge -p "{\"data\":{\"config-underrides.yaml\":\"$new_config\"}}"; then
+    if kubectl patch configmap "$configmap_name" -n ess --type merge -p "{\"data\":{\"$config_key\":\"$new_config\"}}"; then
         log_success "LiveKit ConfigMap更新成功"
 
         # 重启Matrix RTC服务以应用新配置
@@ -995,7 +1104,7 @@ turn:
         kubectl rollout status deployment ess-matrix-rtc-sfu -n ess --timeout=300s
         kubectl rollout status deployment ess-matrix-rtc-authorisation-service -n ess --timeout=300s
 
-        log_success "LiveKit外部IP配置修复完成"
+        log_success "LiveKit外部IP配置修复完成（通过ConfigMap）"
         return 0
     else
         log_error "LiveKit ConfigMap更新失败"
