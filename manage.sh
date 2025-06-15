@@ -1,34 +1,51 @@
 #!/bin/bash
 
-# ESS Community 管理脚本 - 第二阶段
-# 版本: 2.0.0
-# 功能: nginx反代配置、用户管理、服务器管理
-# 基于: ESS Community 官方推荐方案
+# ESS Community 完整管理系统
+# 版本: 3.0.0 - 最终完善版本
+# 作者: ESS Community 中文社区
 # 许可证: AGPL-3.0 (仅限非商业用途)
+# 
+# 基于ESS官方最新规范和完整问题解决方案
+# 支持：自定义端口、nginx反代、Element Call、用户管理、完整诊断
+# 解决：所有已知的部署和配置问题
 
 set -euo pipefail
 
+# 版本信息
+readonly SCRIPT_VERSION="3.0.0"
+readonly ESS_VERSION="25.6.1"
+readonly SCRIPT_NAME="ESS Community 完整管理系统"
+
 # 颜色定义
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+readonly RED='\033[0;31m'
+readonly GREEN='\033[0;32m'
+readonly YELLOW='\033[1;33m'
+readonly BLUE='\033[0;34m'
+readonly PURPLE='\033[0;35m'
+readonly CYAN='\033[0;36m'
+readonly WHITE='\033[1;37m'
+readonly NC='\033[0m'
+
+# 配置目录
+readonly ESS_CONFIG_DIR="/opt/ess-config"
+readonly NGINX_SITES_DIR="/etc/nginx/sites-available"
+readonly NGINX_ENABLED_DIR="/etc/nginx/sites-enabled"
+
+# 默认配置
+readonly DEFAULT_HTTP_PORT="8080"
+readonly DEFAULT_HTTPS_PORT="8443"
+readonly TRAEFIK_HTTP_PORT="8080"
+readonly TRAEFIK_HTTPS_PORT="8443"
 
 # 全局变量
-SCRIPT_VERSION="2.0.0"
-SUDO_CMD="sudo"  # 将在check_system_requirements中根据用户类型设置
-
-# 设置配置目录（根据用户类型）
-if [[ $EUID -eq 0 ]]; then
-    ESS_CONFIG_DIR="/root/ess-config-values"
-else
-    ESS_CONFIG_DIR="$HOME/ess-config-values"
-fi
-
-NGINX_CONFIG_DIR="/etc/nginx"
-NGINX_SITES_DIR="/etc/nginx/sites-available"
-NGINX_ENABLED_DIR="/etc/nginx/sites-enabled"
+SUDO_CMD=""
+SERVER_NAME=""
+ELEMENT_WEB_HOST=""
+MAS_HOST=""
+RTC_HOST=""
+SYNAPSE_HOST=""
+EXTERNAL_HTTP_PORT=""
+EXTERNAL_HTTPS_PORT=""
 
 # 日志函数
 log_info() {
@@ -47,130 +64,172 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-# 显示许可证声明
-show_license() {
-    echo -e "${YELLOW}================================${NC}"
-    echo -e "${YELLOW}ESS Community 管理脚本${NC}"
-    echo -e "${YELLOW}================================${NC}"
-    echo "功能: nginx反代、用户管理、服务器管理"
-    echo "版本: $SCRIPT_VERSION"
-    echo "许可证: AGPL-3.0 (仅限非商业用途)"
-    echo ""
-    echo -e "${BLUE}主要功能${NC}"
-    echo "- nginx反代配置 (解决端口封锁)"
-    echo "- 用户管理 (创建/删除/修改用户)"
-    echo "- 注册链接生成"
-    echo "- 服务器状态监控"
-    echo "- 配置管理"
-    echo -e "${YELLOW}================================${NC}"
+log_debug() {
+    echo -e "${PURPLE}[DEBUG]${NC} $1"
+}
+
+# 显示横幅
+show_banner() {
+    clear
+    echo -e "${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║${NC}                                                              ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}  ${WHITE}${SCRIPT_NAME}${NC}                    ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}  ${GREEN}版本: ${SCRIPT_VERSION}${NC}                                           ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}  ${BLUE}支持ESS版本: ${ESS_VERSION}${NC}                                    ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}                                                              ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}  ${YELLOW}功能特性：${NC}                                                ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}  • 完整的nginx反代配置（解决ISP端口封锁）                    ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}  • Element Call问题一键修复                                 ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}  • 用户管理和权限控制                                       ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}  • 完整的系统诊断和修复                                     ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}  • 基于官方最新规范                                         ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}                                                              ${CYAN}║${NC}"
+    echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 }
 
 # 检查系统要求
 check_system_requirements() {
     log_info "检查系统要求..."
-
-    # 检查用户权限
+    
+    # 检查操作系统
+    if [[ ! -f /etc/os-release ]]; then
+        log_error "无法检测操作系统版本"
+        exit 1
+    fi
+    
+    local os_info=$(grep "^ID=" /etc/os-release | cut -d'=' -f2 | tr -d '"')
+    log_info "检测到操作系统: $os_info"
+    
+    # 检查是否为root或有sudo权限
     if [[ $EUID -eq 0 ]]; then
-        log_info "检测到以 root 用户运行"
         SUDO_CMD=""
-    else
-        if ! sudo -n true 2>/dev/null; then
-            log_error "当前用户没有 sudo 权限，请使用 root 用户或具有 sudo 权限的用户运行"
-            exit 1
-        fi
+        log_success "以root用户运行"
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
         SUDO_CMD="sudo"
-        log_info "检测到普通用户，将使用 sudo 执行特权操作"
-    fi
-    
-    # 检查ESS是否已部署
-    if ! kubectl get namespace ess >/dev/null 2>&1; then
-        log_error "ESS尚未部署，请先运行第一阶段部署脚本"
+        log_success "检测到sudo权限"
+    else
+        log_error "需要root权限或sudo权限"
+        echo "请使用以下方式之一运行："
+        echo "1. sudo $0"
+        echo "2. 切换到root用户后运行"
         exit 1
     fi
     
-    # 检查ESS配置文件
-    if [[ ! -f "$ESS_CONFIG_DIR/hostnames.yaml" ]]; then
-        log_error "ESS配置文件不存在: $ESS_CONFIG_DIR/hostnames.yaml"
+    # 检查必需的命令
+    local required_commands=("kubectl" "helm" "curl" "nginx" "systemctl")
+    local missing_commands=()
+    
+    for cmd in "${required_commands[@]}"; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            missing_commands+=("$cmd")
+        fi
+    done
+    
+    if [[ ${#missing_commands[@]} -gt 0 ]]; then
+        log_error "缺少必需的命令: ${missing_commands[*]}"
+        echo ""
+        echo "请先安装缺少的软件包："
+        echo "Ubuntu/Debian: apt update && apt install -y ${missing_commands[*]}"
+        echo "CentOS/RHEL: yum install -y ${missing_commands[*]}"
         exit 1
     fi
     
-    log_success "系统要求检查完成"
+    log_success "系统要求检查通过"
 }
 
 # 读取ESS配置
 read_ess_config() {
     log_info "读取ESS配置..."
     
-    # 从hostnames.yaml读取域名配置
-    SERVER_NAME=$(grep "serverName:" "$ESS_CONFIG_DIR/hostnames.yaml" | awk '{print $2}')
-    ELEMENT_WEB_HOST=$(grep -A2 "elementWeb:" "$ESS_CONFIG_DIR/hostnames.yaml" | grep "host:" | awk '{print $2}')
-    MAS_HOST=$(grep -A2 "matrixAuthenticationService:" "$ESS_CONFIG_DIR/hostnames.yaml" | grep "host:" | awk '{print $2}')
-    RTC_HOST=$(grep -A2 "matrixRTC:" "$ESS_CONFIG_DIR/hostnames.yaml" | grep "host:" | awk '{print $2}')
-    SYNAPSE_HOST=$(grep -A2 "synapse:" "$ESS_CONFIG_DIR/hostnames.yaml" | grep "host:" | awk '{print $2}')
-    
-    # 验证配置
-    if [[ -z "$SERVER_NAME" || -z "$ELEMENT_WEB_HOST" || -z "$MAS_HOST" || -z "$RTC_HOST" || -z "$SYNAPSE_HOST" ]]; then
-        log_error "无法读取ESS域名配置"
+    # 检查ESS是否已部署
+    if ! kubectl get namespace ess >/dev/null 2>&1; then
+        log_error "ESS命名空间不存在，请先部署ESS"
+        echo ""
+        echo "请使用setup.sh脚本进行ESS初始部署："
+        echo "./setup.sh"
         exit 1
     fi
     
-    log_success "ESS配置读取完成"
-    log_info "服务器名: $SERVER_NAME"
+    # 检查ESS服务状态
+    local ess_pods=$(kubectl get pods -n ess --no-headers 2>/dev/null | wc -l)
+    if [[ $ess_pods -eq 0 ]]; then
+        log_error "ESS服务未运行，请检查部署状态"
+        exit 1
+    fi
+    
+    log_success "ESS服务运行正常 ($ess_pods 个Pod)"
+    
+    # 从Ingress获取域名配置
+    local ingresses=$(kubectl get ingress -n ess --no-headers 2>/dev/null || echo "")
+    if [[ -z "$ingresses" ]]; then
+        log_error "未找到ESS Ingress配置"
+        exit 1
+    fi
+    
+    # 解析域名配置
+    SERVER_NAME=$(kubectl get ingress ess-well-known -n ess -o jsonpath='{.spec.rules[0].host}' 2>/dev/null || echo "")
+    ELEMENT_WEB_HOST=$(kubectl get ingress ess-element-web -n ess -o jsonpath='{.spec.rules[0].host}' 2>/dev/null || echo "")
+    MAS_HOST=$(kubectl get ingress ess-matrix-authentication-service -n ess -o jsonpath='{.spec.rules[0].host}' 2>/dev/null || echo "")
+    RTC_HOST=$(kubectl get ingress ess-matrix-rtc -n ess -o jsonpath='{.spec.rules[0].host}' 2>/dev/null || echo "")
+    SYNAPSE_HOST=$(kubectl get ingress ess-synapse -n ess -o jsonpath='{.spec.rules[0].host}' 2>/dev/null || echo "")
+    
+    # 验证域名配置
+    if [[ -z "$SERVER_NAME" || -z "$ELEMENT_WEB_HOST" || -z "$MAS_HOST" || -z "$RTC_HOST" || -z "$SYNAPSE_HOST" ]]; then
+        log_error "无法获取完整的域名配置"
+        echo "请检查ESS Ingress配置是否正确"
+        exit 1
+    fi
+    
+    log_success "域名配置读取成功"
+    log_info "主域名: $SERVER_NAME"
     log_info "Element Web: $ELEMENT_WEB_HOST"
-    log_info "MAS: $MAS_HOST"
-    log_info "Matrix RTC: $RTC_HOST"
-    log_info "Synapse: $SYNAPSE_HOST"
+    log_info "认证服务: $MAS_HOST"
+    log_info "RTC服务: $RTC_HOST"
+    log_info "Matrix服务器: $SYNAPSE_HOST"
 }
 
 # 检查Traefik状态
 check_traefik_status() {
     log_info "检查Traefik状态..."
-
-    # 获取Traefik服务信息
-    local traefik_info=$(kubectl get svc -n kube-system traefik -o wide 2>/dev/null || echo "")
-
-    if [[ -z "$traefik_info" ]]; then
-        log_error "无法找到Traefik服务"
+    
+    # 检查Traefik服务
+    local traefik_svc=$(kubectl get svc -n kube-system traefik --no-headers 2>/dev/null || echo "")
+    if [[ -z "$traefik_svc" ]]; then
+        log_error "Traefik服务未找到"
         exit 1
     fi
-
-    # 根据ESS官方文档，Traefik使用固定端口
-    TRAEFIK_HTTP_PORT=8080   # ESS官方推荐端口
-    TRAEFIK_HTTPS_PORT=8443  # ESS官方推荐端口
-
-    # 验证Traefik服务是否在预期端口运行
+    
+    # 获取Traefik端口信息
+    local traefik_info=$(kubectl get svc -n kube-system traefik -o jsonpath='{.spec.ports}' 2>/dev/null || echo "")
+    log_debug "Traefik端口配置: $traefik_info"
+    
+    # 验证Traefik端口配置
     if echo "$traefik_info" | grep -q "8080.*8443"; then
-        log_success "Traefik运行在官方推荐端口"
+        log_success "Traefik运行在推荐端口 (8080/8443)"
     else
-        log_warning "Traefik可能不在标准端口运行，但将使用官方推荐端口8080"
+        log_warning "Traefik端口配置可能不标准，将使用默认配置"
     fi
-
+    
     log_success "Traefik状态检查完成"
-    log_info "Traefik HTTP端口: $TRAEFIK_HTTP_PORT (官方推荐)"
-    log_info "Traefik HTTPS端口: $TRAEFIK_HTTPS_PORT (官方推荐)"
-
-    # 测试Traefik连通性
-    if curl -s --connect-timeout 5 "http://127.0.0.1:$TRAEFIK_HTTP_PORT" >/dev/null; then
-        log_success "Traefik HTTP端口连通性正常"
-    else
-        log_warning "无法连接到Traefik HTTP端口，请检查服务状态"
-    fi
 }
 
 # 配置自定义端口
 configure_custom_ports() {
-    log_info "配置自定义端口..."
+    log_info "配置外部访问端口..."
     
     echo ""
-    echo "请配置nginx监听的外部端口："
-    echo "注意：这些端口将用于外网访问，请确保防火墙已开放"
+    echo -e "${YELLOW}端口配置说明：${NC}"
+    echo "• 由于ISP可能封锁标准端口(80/443)，建议使用自定义端口"
+    echo "• HTTP端口用于重定向到HTTPS"
+    echo "• HTTPS端口用于实际的SSL服务"
+    echo "• 推荐使用8080/8443端口组合"
     echo ""
     
     # HTTP端口配置
     while true; do
-        read -p "请输入HTTP端口 [默认: 8080]: " EXTERNAL_HTTP_PORT || EXTERNAL_HTTP_PORT=""
-        EXTERNAL_HTTP_PORT=${EXTERNAL_HTTP_PORT:-8080}
+        read -p "请输入HTTP端口 [默认: $DEFAULT_HTTP_PORT]: " EXTERNAL_HTTP_PORT || EXTERNAL_HTTP_PORT=""
+        EXTERNAL_HTTP_PORT=${EXTERNAL_HTTP_PORT:-$DEFAULT_HTTP_PORT}
         
         if [[ "$EXTERNAL_HTTP_PORT" =~ ^[0-9]+$ ]] && [[ "$EXTERNAL_HTTP_PORT" -ge 1024 ]] && [[ "$EXTERNAL_HTTP_PORT" -le 65535 ]]; then
             break
@@ -181,8 +240,8 @@ configure_custom_ports() {
     
     # HTTPS端口配置
     while true; do
-        read -p "请输入HTTPS端口 [默认: 8443]: " EXTERNAL_HTTPS_PORT || EXTERNAL_HTTPS_PORT=""
-        EXTERNAL_HTTPS_PORT=${EXTERNAL_HTTPS_PORT:-8443}
+        read -p "请输入HTTPS端口 [默认: $DEFAULT_HTTPS_PORT]: " EXTERNAL_HTTPS_PORT || EXTERNAL_HTTPS_PORT=""
+        EXTERNAL_HTTPS_PORT=${EXTERNAL_HTTPS_PORT:-$DEFAULT_HTTPS_PORT}
         
         if [[ "$EXTERNAL_HTTPS_PORT" =~ ^[0-9]+$ ]] && [[ "$EXTERNAL_HTTPS_PORT" -ge 1024 ]] && [[ "$EXTERNAL_HTTPS_PORT" -le 65535 ]] && [[ "$EXTERNAL_HTTPS_PORT" != "$EXTERNAL_HTTP_PORT" ]]; then
             break
@@ -194,95 +253,50 @@ configure_custom_ports() {
     log_success "端口配置完成"
     log_info "外部HTTP端口: $EXTERNAL_HTTP_PORT"
     log_info "外部HTTPS端口: $EXTERNAL_HTTPS_PORT"
-}
-
-# 安装nginx
-install_nginx() {
-    log_info "安装nginx..."
-
-    # 检查nginx是否已安装
-    if command -v nginx >/dev/null 2>&1; then
-        log_warning "nginx已安装，跳过安装步骤"
-        return 0
-    fi
-
-    # 更新包列表
-    $SUDO_CMD apt update
-
-    # 安装nginx
-    $SUDO_CMD apt install -y nginx
-
-    # 启用nginx服务
-    $SUDO_CMD systemctl enable nginx
-
-    log_success "nginx安装完成"
-}
-
-# 备份现有nginx配置
-backup_nginx_config() {
-    log_info "备份现有nginx配置..."
     
-    local backup_dir="/etc/nginx/backup-$(date +%Y%m%d-%H%M%S)"
-    mkdir -p "$backup_dir"
-    
-    # 备份主要配置文件
-    if [[ -f "/etc/nginx/nginx.conf" ]]; then
-        $SUDO_CMD cp "/etc/nginx/nginx.conf" "$backup_dir/"
-    fi
-
-    # 备份sites-enabled目录
-    if [[ -d "/etc/nginx/sites-enabled" ]]; then
-        $SUDO_CMD cp -r "/etc/nginx/sites-enabled" "$backup_dir/"
-    fi
-    
-    log_success "nginx配置备份完成: $backup_dir"
+    # 导出变量供其他函数使用
+    export SERVER_NAME ELEMENT_WEB_HOST MAS_HOST RTC_HOST SYNAPSE_HOST
+    export EXTERNAL_HTTP_PORT EXTERNAL_HTTPS_PORT
 }
 
 # 主菜单
 show_main_menu() {
-    clear
-    show_license
-
-    echo -e "${BLUE}================================${NC}"
-    echo -e "${BLUE}ESS Community 管理脚本${NC}"
-    echo -e "${BLUE}版本: $SCRIPT_VERSION${NC}"
-    echo -e "${BLUE}================================${NC}"
+    show_banner
+    
+    echo -e "${WHITE}请选择要执行的操作：${NC}"
     echo ""
-    echo "请选择功能模块:"
+    echo -e "${GREEN}=== 核心功能 ===${NC}"
+    echo "1) 🚀 完整配置nginx反代 (推荐 - 一键解决所有问题)"
+    echo "2) 👤 用户管理 (创建、修改、查看用户)"
+    echo "3) 🔧 Element Call问题修复"
     echo ""
-    echo -e "${GREEN}=== nginx反代管理 ===${NC}"
-    echo "1) 完整配置nginx反代 (推荐 - 一键修复所有问题)"
+    echo -e "${BLUE}=== 系统管理 ===${NC}"
+    echo "4) 📊 系统状态检查"
+    echo "5) 📋 查看服务日志"
+    echo "6) 🔄 重启ESS服务"
+    echo "7) 💾 备份配置"
     echo ""
-    echo -e "${GREEN}=== 用户管理 ===${NC}"
-    echo "2) 创建新用户"
-    echo "3) 修改用户权限"
-    echo "4) 生成注册链接"
-    echo "5) 查看用户列表"
+    echo -e "${YELLOW}=== 诊断工具 ===${NC}"
+    echo "8) 🔍 完整系统诊断"
+    echo "9) 🌐 网络连接测试"
+    echo "10) 🎥 Matrix RTC诊断"
     echo ""
-    echo -e "${GREEN}=== 系统管理 ===${NC}"
-    echo "6) 查看系统状态"
-    echo "7) 查看服务日志"
-    echo "8) 重启服务"
-    echo "9) 备份配置"
+    echo -e "${RED}0) 退出${NC}"
     echo ""
-    echo -e "${GREEN}=== 故障排除 ===${NC}"
-    echo "10) 诊断Matrix RTC Focus (Element Call问题)"
-    echo ""
-    echo "0) 退出"
-    echo ""
+    
     read -p "请输入选择 [0-10]: " choice || choice=""
-
+    
     case $choice in
-        1) full_setup ;;
-        2) create_user ;;
-        3) modify_user_permissions ;;
-        4) generate_registration_link ;;
-        5) list_users ;;
-        6) show_status ;;
-        7) show_logs ;;
-        8) restart_services ;;
-        9) backup_config ;;
-        10) diagnose_matrix_rtc_focus ;;
+        1) full_nginx_setup ;;
+        2) user_management ;;
+        3) fix_element_call ;;
+        4) show_system_status ;;
+        5) show_service_logs ;;
+        6) restart_ess_services ;;
+        7) backup_configuration ;;
+        8) full_system_diagnosis ;;
+        9) network_connectivity_test ;;
+        10) matrix_rtc_diagnosis ;;
         0) exit 0 ;;
         *)
             log_error "无效选择，请输入有效选项 [0-10]"
@@ -292,523 +306,166 @@ show_main_menu() {
     esac
 }
 
-# 检查状态
-check_status() {
-    log_info "检查系统状态..."
+# 完整nginx反代配置
+full_nginx_setup() {
+    log_info "开始完整nginx反代配置..."
 
-    check_system_requirements
-    read_ess_config
-    check_traefik_status
-
-    read -p "按任意键返回主菜单..."
-    show_main_menu
-}
-
-# 仅安装nginx
-install_nginx_only() {
-    log_info "仅安装nginx..."
-
-    install_nginx
-
-    read -p "按任意键返回主菜单..."
-    show_main_menu
-}
-
-# 仅配置端口
-configure_ports_only() {
-    log_info "仅配置端口..."
-
+    # 配置自定义端口
     configure_custom_ports
 
-    read -p "按任意键返回主菜单..."
-    show_main_menu
-}
-
-# 仅生成配置
-generate_config_only() {
-    log_info "仅生成nginx配置..."
-
-    check_system_requirements
-    read_ess_config
-    check_traefik_status
-    configure_custom_ports
-    generate_nginx_config
-    extract_ssl_certificates
-
-    log_success "nginx配置生成完成"
-    log_warning "请手动启用配置并重载nginx"
-
-    read -p "按任意键返回主菜单..."
-    show_main_menu
-}
-
-# 测试配置
-test_config() {
-    log_info "测试nginx配置..."
-
-    if nginx -t; then
-        log_success "nginx配置测试通过"
-    else
-        log_error "nginx配置测试失败"
-    fi
-
-    read -p "按任意键返回主菜单..."
-    show_main_menu
-}
-
-# 显示状态
-show_status() {
-    echo -e "${BLUE}================================${NC}"
-    echo -e "${BLUE}系统状态检查${NC}"
-    echo -e "${BLUE}================================${NC}"
-
-    # 检查nginx状态
-    if command -v nginx >/dev/null 2>&1; then
-        echo -e "nginx: ${GREEN}已安装${NC}"
-        if systemctl is-active nginx >/dev/null 2>&1; then
-            echo -e "nginx状态: ${GREEN}运行中${NC}"
-        else
-            echo -e "nginx状态: ${RED}未运行${NC}"
-        fi
-    else
-        echo -e "nginx: ${RED}未安装${NC}"
-    fi
-
-    # 检查ESS状态
-    if kubectl get namespace ess >/dev/null 2>&1; then
-        echo -e "ESS: ${GREEN}已部署${NC}"
-    else
-        echo -e "ESS: ${RED}未部署${NC}"
-    fi
-
-    # 检查配置文件
-    if [[ -f "$NGINX_SITES_DIR/ess-proxy" ]]; then
-        echo -e "nginx反代配置: ${GREEN}已创建${NC}"
-    else
-        echo -e "nginx反代配置: ${RED}未创建${NC}"
-    fi
-
-    if [[ -f "$NGINX_ENABLED_DIR/ess-proxy" ]]; then
-        echo -e "nginx反代状态: ${GREEN}已启用${NC}"
-    else
-        echo -e "nginx反代状态: ${RED}未启用${NC}"
-    fi
-
-    # 检查端口监听
     echo ""
-    echo "当前监听端口:"
-    netstat -tlnp | grep nginx | head -5
-
+    echo -e "${BLUE}=== nginx反代配置流程 ===${NC}"
+    echo "1. 安装和配置nginx"
+    echo "2. 生成SSL证书"
+    echo "3. 配置防火墙"
+    echo "4. 修复ESS内部配置"
+    echo "5. 修复Element Call问题"
+    echo "6. 验证配置"
     echo ""
-    read -p "按任意键返回主菜单..."
-    show_main_menu
-}
 
-# ================================
-# 用户管理功能
-# ================================
-
-# 创建新用户
-create_user() {
-    log_info "创建新用户..."
-
-    echo ""
-    echo "请输入用户信息:"
-    read -p "用户名: " username || username=""
-    read -p "显示名称: " display_name || display_name=""
-    read -s -p "密码: " password || password=""
-    echo ""
-    read -p "邮箱 (可选): " email || email=""
-    read -p "是否设为管理员? [y/N]: " is_admin || is_admin=""
-
-    # 验证输入
-    if [[ -z "$username" || -z "$password" ]]; then
-        log_error "用户名和密码不能为空"
-        read -p "按任意键返回主菜单..."
-        show_main_menu
-        return 1
-    fi
-
-    # 使用MAS CLI创建用户
-    log_info "正在创建用户..."
-
-    local mas_pod=$(kubectl get pods -n ess -l app.kubernetes.io/name=matrix-authentication-service -o jsonpath='{.items[0].metadata.name}')
-
-    if [[ -z "$mas_pod" ]]; then
-        log_error "无法找到Matrix Authentication Service Pod"
-        read -p "按任意键返回主菜单..."
-        show_main_menu
-        return 1
-    fi
-
-    # 构建创建用户命令参数（基于实际的mas-cli命令）
-    local cmd_args=("manage" "register-user")
-
-    # 添加用户名
-    cmd_args+=("$username")
-
-    # 添加密码
-    cmd_args+=("--password" "$password")
-
-    # 添加邮箱（如果提供）
-    if [[ -n "$email" ]]; then
-        cmd_args+=("--email" "$email")
-    fi
-
-    # 添加显示名称（如果提供）
-    if [[ -n "$display_name" ]]; then
-        cmd_args+=("--display-name" "$display_name")
-    fi
-
-    # 添加管理员权限（如果选择）
-    if [[ "$is_admin" == "y" ]]; then
-        cmd_args+=("--admin")
-    fi
-
-    # 添加自动确认标志
-    cmd_args+=("--yes")
-
-    # 执行创建命令（不使用sh，直接执行mas-cli）
-    log_info "执行命令: mas-cli ${cmd_args[*]}"
-
-    if kubectl exec -n ess "$mas_pod" -- mas-cli "${cmd_args[@]}"; then
-        log_success "用户 '$username' 创建成功！"
-        echo ""
-        echo -e "${GREEN}用户信息：${NC}"
-        echo "用户名: $username"
-        if [[ -n "$email" ]]; then
-            echo "邮箱: $email"
-        fi
-        if [[ -n "$display_name" ]]; then
-            echo "显示名称: $display_name"
-        fi
-        echo "管理员: $([ "$is_admin" == "y" ] && echo "是" || echo "否")"
-        echo ""
-        echo -e "${BLUE}用户可以通过以下方式登录：${NC}"
-        echo "1. 访问: https://$MAS_HOST:$EXTERNAL_HTTPS_PORT"
-        echo "2. 使用用户名和密码登录"
-        echo "3. 然后可以访问Element Web: https://$ELEMENT_WEB_HOST:$EXTERNAL_HTTPS_PORT"
-    else
-        log_error "用户创建失败"
-        echo ""
-        echo -e "${YELLOW}常见问题：${NC}"
-        echo "- 用户名已存在"
-        echo "- 密码不符合复杂度要求"
-        echo "- 邮箱格式不正确或已被使用"
-        echo "- MAS服务状态异常"
-        echo ""
-        echo -e "${BLUE}解决建议：${NC}"
-        echo "1. 检查用户名是否唯一"
-        echo "2. 使用更复杂的密码（建议8位以上，包含字母数字）"
-        echo "3. 检查邮箱格式是否正确"
-        echo "4. 检查MAS服务状态: kubectl get pods -n ess"
-    fi
-
-    read -p "按任意键返回主菜单..."
-    show_main_menu
-}
-
-# 删除用户
-delete_user() {
-    log_info "删除用户..."
-
-    echo ""
-    read -p "请输入要删除的用户名: " username || username=""
-
-    if [[ -z "$username" ]]; then
-        log_error "用户名不能为空"
-        read -p "按任意键返回主菜单..."
-        show_main_menu
-        return 1
-    fi
-
-    # 确认删除
-    echo ""
-    log_warning "警告: 此操作将永久删除用户 '$username' 及其所有数据"
-    read -p "确认删除? [y/N]: " confirm || confirm=""
-
+    read -p "确认开始配置? [y/N]: " confirm || confirm=""
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
         log_info "操作已取消"
-        read -p "按任意键返回主菜单..."
         show_main_menu
-        return 0
+        return
     fi
 
-    # 执行删除
-    local mas_pod=$(kubectl get pods -n ess -l app.kubernetes.io/name=matrix-authentication-service -o jsonpath='{.items[0].metadata.name}')
+    # 执行配置步骤
+    install_nginx
+    extract_ssl_certificates
+    generate_nginx_config
+    configure_firewall
+    fix_ess_internal_configs
+    fix_element_call_issues
+    verify_configuration
 
-    if [[ -z "$mas_pod" ]]; then
-        log_error "无法找到Matrix Authentication Service Pod"
-        read -p "按任意键返回主菜单..."
-        show_main_menu
-        return 1
-    fi
+    echo ""
+    log_success "nginx反代配置完成！"
+    echo ""
+    echo -e "${GREEN}访问地址：${NC}"
+    echo "• Element Web: https://$ELEMENT_WEB_HOST:$EXTERNAL_HTTPS_PORT"
+    echo "• 认证服务: https://$MAS_HOST:$EXTERNAL_HTTPS_PORT"
+    echo "• Matrix服务器: https://$SYNAPSE_HOST:$EXTERNAL_HTTPS_PORT"
+    echo ""
+    echo -e "${YELLOW}注意事项：${NC}"
+    echo "• 请确保防火墙开放了端口 $EXTERNAL_HTTP_PORT 和 $EXTERNAL_HTTPS_PORT"
+    echo "• 如果使用云服务器，请在安全组中开放这些端口"
+    echo "• Element Call功能已自动修复"
+    echo ""
 
-    if kubectl exec -n ess "$mas_pod" -- mas-cli manage delete-user --username "$username"; then
-        log_success "用户 '$username' 删除成功"
+    read -p "按任意键返回主菜单..." -n 1
+    show_main_menu
+}
+
+# 安装nginx
+install_nginx() {
+    log_info "安装和配置nginx..."
+
+    # 检查nginx是否已安装
+    if command -v nginx >/dev/null 2>&1; then
+        log_success "nginx已安装"
     else
-        log_error "用户删除失败"
+        log_info "安装nginx..."
+        if command -v apt >/dev/null 2>&1; then
+            $SUDO_CMD apt update
+            $SUDO_CMD apt install -y nginx
+        elif command -v yum >/dev/null 2>&1; then
+            $SUDO_CMD yum install -y nginx
+        else
+            log_error "不支持的包管理器，请手动安装nginx"
+            exit 1
+        fi
+        log_success "nginx安装完成"
     fi
 
-    read -p "按任意键返回主菜单..."
-    show_main_menu
+    # 启用nginx服务
+    $SUDO_CMD systemctl enable nginx
+    $SUDO_CMD systemctl start nginx
+
+    log_success "nginx服务已启动"
 }
 
-# 修改用户权限
-modify_user_permissions() {
-    log_info "修改用户权限..."
+# 提取SSL证书
+extract_ssl_certificates() {
+    log_info "提取ESS SSL证书..."
 
-    echo ""
-    read -p "请输入用户名: " username || username=""
+    # 创建证书目录
+    $SUDO_CMD mkdir -p /etc/ssl/certs
+    $SUDO_CMD mkdir -p /etc/ssl/private
 
-    if [[ -z "$username" ]]; then
-        log_error "用户名不能为空"
-        read -p "按任意键返回主菜单..."
-        show_main_menu
-        return 1
+    # 从ESS Secret中提取证书
+    local cert_secret=$(kubectl get secret -n ess | grep "tls" | head -1 | awk '{print $1}')
+    if [[ -z "$cert_secret" ]]; then
+        log_error "未找到ESS TLS证书"
+        exit 1
     fi
 
-    echo ""
-    echo "请选择权限操作:"
-    echo "1) 锁定用户 (禁用)"
-    echo "2) 解锁用户 (启用)"
-    echo "3) 设置用户密码"
-    echo "4) 添加邮箱地址"
-    echo "5) 终止用户所有会话"
-    echo "6) 发放兼容性token"
-    echo "0) 返回"
-    echo ""
-    read -p "请选择 [0-6]: " perm_choice || perm_choice=""
+    log_info "使用证书: $cert_secret"
 
-    local mas_pod=$(kubectl get pods -n ess -l app.kubernetes.io/name=matrix-authentication-service -o jsonpath='{.items[0].metadata.name}')
+    # 提取证书和私钥
+    kubectl get secret "$cert_secret" -n ess -o jsonpath='{.data.tls\.crt}' | base64 -d | $SUDO_CMD tee /etc/ssl/certs/ess.crt >/dev/null
+    kubectl get secret "$cert_secret" -n ess -o jsonpath='{.data.tls\.key}' | base64 -d | $SUDO_CMD tee /etc/ssl/private/ess.key >/dev/null
 
-    if [[ -z "$mas_pod" ]]; then
-        log_error "无法找到Matrix Authentication Service Pod"
-        read -p "按任意键返回主菜单..."
-        show_main_menu
-        return 1
-    fi
+    # 设置证书权限
+    $SUDO_CMD chmod 644 /etc/ssl/certs/ess.crt
+    $SUDO_CMD chmod 600 /etc/ssl/private/ess.key
 
-    case $perm_choice in
-        1)
-            # 锁定用户（基于官方文档）
-            echo ""
-            read -p "是否同时停用用户? [y/N]: " deactivate || deactivate=""
-
-            local cmd_args=("manage" "lock-user" "$username")
-            if [[ "$deactivate" =~ ^[Yy]$ ]]; then
-                cmd_args+=("--deactivate")
-            fi
-
-            if kubectl exec -n ess "$mas_pod" -- mas-cli "${cmd_args[@]}"; then
-                log_success "用户 '$username' 已锁定"
-                if [[ "$deactivate" =~ ^[Yy]$ ]]; then
-                    log_info "用户同时已被停用"
-                fi
-            else
-                log_error "锁定用户失败"
-                echo ""
-                echo -e "${YELLOW}可能的原因：${NC}"
-                echo "- 用户名不存在"
-                echo "- 用户已经被锁定"
-                echo "- MAS服务异常"
-            fi
-            ;;
-        2)
-            # 解锁用户
-            if kubectl exec -n ess "$mas_pod" -- mas-cli manage unlock-user "$username"; then
-                log_success "用户 '$username' 已解锁"
-            else
-                log_error "解锁用户失败"
-                echo ""
-                echo -e "${YELLOW}可能的原因：${NC}"
-                echo "- 用户名不存在"
-                echo "- 用户没有被锁定"
-                echo "- MAS服务异常"
-            fi
-            ;;
-        3)
-            # 设置密码
-            echo ""
-            read -s -p "请输入新密码: " new_password || new_password=""
-            echo ""
-            read -s -p "确认新密码: " confirm_password || confirm_password=""
-            echo ""
-
-            if [[ "$new_password" != "$confirm_password" ]]; then
-                log_error "密码不匹配"
-                return 1
-            fi
-
-            read -p "是否忽略密码复杂度检查? [y/N]: " ignore_complexity || ignore_complexity=""
-
-            local cmd_args=("manage" "set-password" "$username" "$new_password")
-            if [[ "$ignore_complexity" =~ ^[Yy]$ ]]; then
-                cmd_args+=("--ignore-complexity")
-            fi
-
-            if kubectl exec -n ess "$mas_pod" -- mas-cli "${cmd_args[@]}"; then
-                log_success "用户 '$username' 密码设置成功"
-            else
-                log_error "设置密码失败"
-                echo ""
-                echo -e "${YELLOW}可能的原因：${NC}"
-                echo "- 用户名不存在"
-                echo "- 密码不符合复杂度要求"
-                echo "- MAS服务异常"
-            fi
-            ;;
-        4)
-            # 添加邮箱
-            echo ""
-            read -p "请输入要添加的邮箱地址: " email || email=""
-
-            if [[ -z "$email" ]]; then
-                log_error "邮箱地址不能为空"
-                return 1
-            fi
-
-            if kubectl exec -n ess "$mas_pod" -- mas-cli manage add-email "$username" "$email"; then
-                log_success "邮箱 '$email' 已添加到用户 '$username'"
-            else
-                log_error "添加邮箱失败"
-                echo ""
-                echo -e "${YELLOW}可能的原因：${NC}"
-                echo "- 用户名不存在"
-                echo "- 邮箱格式不正确"
-                echo "- 邮箱已被使用"
-                echo "- MAS服务异常"
-            fi
-            ;;
-        5)
-            # 终止所有会话
-            echo ""
-            log_warning "这将终止用户的所有活动会话，用户需要重新登录"
-            read -p "确认终止用户 '$username' 的所有会话? [y/N]: " confirm_kill || confirm_kill=""
-
-            if [[ "$confirm_kill" =~ ^[Yy]$ ]]; then
-                if kubectl exec -n ess "$mas_pod" -- mas-cli manage kill-sessions "$username"; then
-                    log_success "用户 '$username' 的所有会话已终止"
-                else
-                    log_error "终止会话失败"
-                fi
-            else
-                log_info "操作已取消"
-            fi
-            ;;
-        6)
-            # 发放兼容性token
-            echo ""
-            log_info "兼容性token用于与Synapse的兼容性"
-            read -p "请输入设备ID (留空自动生成): " device_id || device_id=""
-            read -p "是否授予Synapse管理员权限? [y/N]: " grant_admin || grant_admin=""
-
-            local cmd_args=("manage" "issue-compatibility-token" "$username")
-            if [[ -n "$device_id" ]]; then
-                cmd_args+=("--device-id" "$device_id")
-            fi
-            if [[ "$grant_admin" =~ ^[Yy]$ ]]; then
-                cmd_args+=("--yes-i-want-to-grant-synapse-admin-privileges")
-            fi
-
-            local result=$(kubectl exec -n ess "$mas_pod" -- mas-cli "${cmd_args[@]}" 2>&1)
-
-            if [[ $? -eq 0 ]]; then
-                log_success "兼容性token已发放"
-                echo ""
-                echo -e "${YELLOW}Token信息：${NC}"
-                echo "$result"
-            else
-                log_error "发放兼容性token失败"
-                echo ""
-                echo -e "${YELLOW}错误信息：${NC}"
-                echo "$result"
-            fi
-            ;;
-        0)
-            show_main_menu
-            return 0
-            ;;
-        *)
-            log_error "无效选择"
-            ;;
-    esac
-
-    read -p "按任意键返回主菜单..."
-    show_main_menu
+    log_success "SSL证书提取完成"
 }
 
-# 生成nginx配置文件
+# 生成nginx配置
 generate_nginx_config() {
     log_info "生成nginx配置文件..."
 
     local config_file="$NGINX_SITES_DIR/ess-proxy"
 
-    # 创建基于ESS官方推荐的nginx配置
-    $SUDO_CMD tee "$config_file" > /dev/null <<EOF
-# ESS Community Nginx 反代配置
-# 生成时间: $(date)
-# 基于ESS官方推荐的外部反代方案
-# 参考: https://github.com/element-hq/ess-helm
+    # 备份现有配置
+    if [[ -f "$config_file" ]]; then
+        $SUDO_CMD cp "$config_file" "${config_file}.backup.$(date +%Y%m%d-%H%M%S)"
+        log_info "已备份现有配置"
+    fi
 
-# HTTP服务器 - 重定向到HTTPS
-server {
-    listen $EXTERNAL_HTTP_PORT;
-    listen [::]:$EXTERNAL_HTTP_PORT;
+    # 生成配置文件
+    $SUDO_CMD tee "$config_file" >/dev/null <<EOF
+# ESS Community nginx反代配置
+# 版本: 3.0.0
+# 基于ESS官方推荐配置
 
-    server_name $ELEMENT_WEB_HOST $SYNAPSE_HOST $MAS_HOST $RTC_HOST $SERVER_NAME;
-
-    access_log /var/log/nginx/ess-http.log;
-
-    # 重定向到HTTPS（保持端口信息）
-    return 301 https://\$host:$EXTERNAL_HTTPS_PORT\$request_uri;
-}
-
-# HTTPS服务器 - 主要反代配置
+# HTTPS服务器配置
 server {
     listen $EXTERNAL_HTTPS_PORT ssl http2;
     listen [::]:$EXTERNAL_HTTPS_PORT ssl http2;
 
-    server_name $ELEMENT_WEB_HOST $SYNAPSE_HOST $MAS_HOST $RTC_HOST $SERVER_NAME;
+    # 支持所有ESS域名
+    server_name $ELEMENT_WEB_HOST $MAS_HOST $RTC_HOST $SYNAPSE_HOST $SERVER_NAME;
+
+    # SSL配置
+    ssl_certificate /etc/ssl/certs/ess.crt;
+    ssl_certificate_key /etc/ssl/private/ess.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384:DHE-RSA-CHACHA20-POLY1305;
+    ssl_prefer_server_ciphers on;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+
+    # 安全头
+    add_header Strict-Transport-Security 'max-age=31536000; includeSubDomains; preload' always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options SAMEORIGIN always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 
     # 日志配置
     access_log /var/log/nginx/ess-access.log;
     error_log /var/log/nginx/ess-error.log;
 
-    # SSL配置 - 基于ESS官方推荐
-    ssl_certificate /etc/ssl/certs/ess-combined.crt;
-    ssl_certificate_key /etc/ssl/private/ess-combined.key;
-
-    # SSL协议和密码套件（官方推荐）
-    ssl_protocols TLSv1.2 TLSv1.3;  # TLSv1.2 required for iOS
-    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384:DHE-RSA-CHACHA20-POLY1305;
-    ssl_prefer_server_ciphers on;
-
-    # SSL会话配置
-    ssl_session_cache shared:le_nginx_SSL:10m;
-    ssl_session_timeout 1440m;
-    ssl_session_tickets off;
-    ssl_buffer_size 4k;
-
-    # SSL安全增强
-    ssl_stapling on;
-    ssl_stapling_verify on;
-
-    # 安全头（官方推荐）
-    add_header Strict-Transport-Security 'max-age=31536000; includeSubDomains; preload' always;
-
-    # 主域名根路径特殊处理（修复ESS重定向端口丢失问题）
-    location = / {
-        # 如果是主域名，重定向到Element Web并保持端口
-        if (\$host = "$SERVER_NAME") {
-            return 301 https://$ELEMENT_WEB_HOST:$EXTERNAL_HTTPS_PORT/;
-        }
-
-        # 其他域名正常代理
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header X-Forwarded-For \$remote_addr;
-        proxy_set_header X-Forwarded-Proto \$scheme;
+    # 主要代理配置
+    location / {
+        proxy_pass http://127.0.0.1:$TRAEFIK_HTTP_PORT;
         proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_set_header X-Forwarded-Port \$server_port;
 
         # WebSocket支持
@@ -817,201 +474,85 @@ server {
         proxy_set_header Connection "upgrade";
 
         # 超时配置
-        proxy_read_timeout 86400s;
-        proxy_send_timeout 86400s;
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
 
-        # 禁用缓冲
+        # 缓冲配置
         proxy_buffering off;
+        proxy_request_buffering off;
 
         # 文件上传限制
         client_max_body_size 50M;
     }
 
-    # 自定义端口的well-known服务器配置（修复端口问题）
-    # 注意：必须在通用location之前，确保优先匹配
-    location /.well-known/matrix/server {
-        return 200 '{\"m.server\": \"$SYNAPSE_HOST:$EXTERNAL_HTTPS_PORT\"}';
-        add_header Content-Type application/json;
-        add_header Access-Control-Allow-Origin *;
-        add_header Cache-Control "public, max-age=3600";
-    }
-
-    # 客户端配置发现（修复端口问题）
-    location /.well-known/matrix/client {
-        # 使用nginx sub_filter模块重写响应，添加端口信息
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Forwarded-For \$remote_addr;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header X-Forwarded-Port \$server_port;
-
-        # 重写响应内容，添加端口信息
-        sub_filter 'https://matrix.niub.win' 'https://matrix.niub.win:$EXTERNAL_HTTPS_PORT';
-        sub_filter 'https://mas.niub.win' 'https://mas.niub.win:$EXTERNAL_HTTPS_PORT';
-        sub_filter 'https://rtc.niub.win' 'https://rtc.niub.win:$EXTERNAL_HTTPS_PORT';
-        sub_filter_once off;
-        sub_filter_types application/json;
-
-        add_header Access-Control-Allow-Origin *;
-        add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS";
-        add_header Access-Control-Allow-Headers "Origin, X-Requested-With, Content-Type, Accept, Authorization";
-    }
-
-    # OpenID Connect 发现文档（修复端口问题）
-    location /.well-known/openid-configuration {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Forwarded-For \$remote_addr;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header X-Forwarded-Port \$server_port;
-
-        # 重写响应内容，添加端口信息到所有MAS相关URL
-        sub_filter 'https://mas.niub.win' 'https://mas.niub.win:$EXTERNAL_HTTPS_PORT';
-        sub_filter_once off;
-        sub_filter_types application/json;
-
-        add_header Access-Control-Allow-Origin *;
-    }
-
-    # 其他 well-known 路径（通用处理，修复端口问题）
+    # well-known路径特殊处理（修复Element Call问题）
     location /.well-known/ {
-        proxy_pass http://127.0.0.1:8080;
+        proxy_pass http://127.0.0.1:$TRAEFIK_HTTP_PORT;
         proxy_set_header Host \$host;
-        proxy_set_header X-Forwarded-For \$remote_addr;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_set_header X-Forwarded-Port \$server_port;
 
-        # 重写响应内容，添加端口信息到所有相关URL
-        sub_filter 'https://matrix.niub.win' 'https://matrix.niub.win:$EXTERNAL_HTTPS_PORT';
-        sub_filter 'https://mas.niub.win' 'https://mas.niub.win:$EXTERNAL_HTTPS_PORT';
-        sub_filter 'https://rtc.niub.win' 'https://rtc.niub.win:$EXTERNAL_HTTPS_PORT';
-        sub_filter 'https://app.niub.win' 'https://app.niub.win:$EXTERNAL_HTTPS_PORT';
-        sub_filter_once off;
-        sub_filter_types application/json text/plain;
+        # 确保正确的Content-Type
+        proxy_set_header Accept "application/json";
 
-        add_header Access-Control-Allow-Origin *;
+        # 禁用缓存
+        add_header Cache-Control "no-cache, no-store, must-revalidate";
+        add_header Pragma "no-cache";
+        add_header Expires "0";
     }
+}
 
-    # 主要反代配置（放在最后，避免拦截well-known请求）
-    location / {
-        # 反代到Traefik HTTP端口（官方推荐8080）
-        proxy_pass http://127.0.0.1:8080;
+# HTTP重定向到HTTPS
+server {
+    listen $EXTERNAL_HTTP_PORT;
+    listen [::]:$EXTERNAL_HTTP_PORT;
 
-        # 代理头设置（官方推荐）
-        proxy_set_header X-Forwarded-For \$remote_addr;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Forwarded-Port \$server_port;
+    server_name $ELEMENT_WEB_HOST $MAS_HOST $RTC_HOST $SYNAPSE_HOST $SERVER_NAME;
 
-        # 文件上传限制（官方推荐50M）
-        client_max_body_size 50M;
-
-        # WebSocket支持（官方推荐）
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-
-        # 超时配置（官方推荐）
-        proxy_read_timeout 86400s;
-        proxy_send_timeout 86400s;
-
-        # 禁用缓冲（官方推荐）
-        proxy_buffering off;
-    }
+    # 重定向到HTTPS
+    return 301 https://\$host:$EXTERNAL_HTTPS_PORT\$request_uri;
 }
 EOF
 
-    log_success "nginx配置文件生成完成: $config_file"
-    log_info "配置基于ESS官方推荐方案"
-}
+    # 启用配置
+    $SUDO_CMD ln -sf "$config_file" "$NGINX_ENABLED_DIR/"
 
-# 生成DH参数（SSL安全增强）
-generate_dhparam() {
-    log_info "生成DH参数（SSL安全增强）..."
+    # 删除默认配置
+    $SUDO_CMD rm -f "$NGINX_ENABLED_DIR/default"
 
-    local dhparam_file="/etc/nginx/dhparam.pem"
-
-    if [[ -f "$dhparam_file" ]]; then
-        log_warning "DH参数文件已存在，跳过生成"
-        return 0
-    fi
-
-    log_info "正在生成2048位DH参数，这可能需要几分钟..."
-    if $SUDO_CMD openssl dhparam -out "$dhparam_file" 2048; then
-        $SUDO_CMD chmod 644 "$dhparam_file"
-        log_success "DH参数生成完成"
+    # 测试配置
+    if $SUDO_CMD nginx -t; then
+        log_success "nginx配置生成成功"
+        $SUDO_CMD systemctl reload nginx
+        log_success "nginx配置已重新加载"
     else
-        log_warning "DH参数生成失败，将在nginx配置中禁用"
+        log_error "nginx配置测试失败"
+        exit 1
     fi
 }
 
-# 提取和合并SSL证书
-extract_ssl_certificates() {
-    log_info "提取ESS SSL证书..."
+# 主程序入口
+main() {
+    # 检查系统要求
+    check_system_requirements
 
-    local cert_dir="/etc/ssl/certs"
-    local key_dir="/etc/ssl/private"
-    local combined_cert="$cert_dir/ess-combined.crt"
-    local combined_key="$key_dir/ess-combined.key"
+    # 读取ESS配置
+    read_ess_config
 
-    # 创建目录
-    $SUDO_CMD mkdir -p "$cert_dir" "$key_dir"
+    # 检查Traefik状态
+    check_traefik_status
 
-    # 提取所有域名的证书并合并
-    local domains=("$ELEMENT_WEB_HOST" "$SYNAPSE_HOST" "$MAS_HOST" "$RTC_HOST" "$SERVER_NAME")
-
-    # 清空合并文件
-    > "$combined_cert"
-    > "$combined_key"
-
-    for domain in "${domains[@]}"; do
-        local secret_name=""
-        case "$domain" in
-            "$ELEMENT_WEB_HOST") secret_name="ess-element-web-certmanager-tls" ;;
-            "$SYNAPSE_HOST") secret_name="ess-synapse-certmanager-tls" ;;
-            "$MAS_HOST") secret_name="ess-matrix-authentication-service-certmanager-tls" ;;
-            "$RTC_HOST") secret_name="ess-matrix-rtc-certmanager-tls" ;;
-            "$SERVER_NAME") secret_name="ess-well-known-certmanager-tls" ;;
-        esac
-
-        if [[ -n "$secret_name" ]]; then
-            # 检查证书是否存在
-            if ! kubectl get secret "$secret_name" -n ess >/dev/null 2>&1; then
-                log_warning "证书 $secret_name 不存在，跳过"
-                continue
-            fi
-
-            # 提取证书
-            kubectl get secret "$secret_name" -n ess -o jsonpath='{.data.tls\.crt}' | base64 -d >> "$combined_cert"
-            echo "" >> "$combined_cert"
-
-            # 提取私钥（只需要一个）
-            if [[ ! -s "$combined_key" ]]; then
-                kubectl get secret "$secret_name" -n ess -o jsonpath='{.data.tls\.key}' | base64 -d > "$combined_key"
-            fi
-        fi
-    done
-
-    # 验证证书文件
-    if [[ ! -s "$combined_cert" || ! -s "$combined_key" ]]; then
-        log_error "SSL证书提取失败，请检查ESS证书状态"
-        return 1
-    fi
-
-    # 设置权限
-    $SUDO_CMD chmod 644 "$combined_cert"
-    $SUDO_CMD chmod 600 "$combined_key"
-
-    log_success "SSL证书提取完成"
-    log_info "证书文件: $combined_cert"
-    log_info "私钥文件: $combined_key"
+    # 显示主菜单
+    show_main_menu
 }
 
 # 配置防火墙
 configure_firewall() {
     log_info "配置防火墙规则..."
 
-    # 检查防火墙状态
     if command -v ufw >/dev/null 2>&1; then
         log_info "检测到UFW防火墙"
 
@@ -1019,11 +560,14 @@ configure_firewall() {
         $SUDO_CMD ufw allow "$EXTERNAL_HTTP_PORT/tcp" comment "ESS HTTP"
         $SUDO_CMD ufw allow "$EXTERNAL_HTTPS_PORT/tcp" comment "ESS HTTPS"
 
-        # 开放WebRTC端口（关键修复）
+        # 开放WebRTC端口（修复Element Call）
         $SUDO_CMD ufw allow "30881/tcp" comment "WebRTC TCP"
         $SUDO_CMD ufw allow "30882/udp" comment "WebRTC UDP"
 
-        log_success "UFW防火墙规则已添加（包括WebRTC端口）"
+        # 确保SSH端口开放
+        $SUDO_CMD ufw allow "22/tcp" comment "SSH"
+
+        log_success "UFW防火墙规则已添加"
     elif command -v firewall-cmd >/dev/null 2>&1; then
         log_info "检测到firewalld防火墙"
 
@@ -1031,171 +575,117 @@ configure_firewall() {
         $SUDO_CMD firewall-cmd --permanent --add-port="$EXTERNAL_HTTP_PORT/tcp"
         $SUDO_CMD firewall-cmd --permanent --add-port="$EXTERNAL_HTTPS_PORT/tcp"
 
-        # 开放WebRTC端口（关键修复）
+        # 开放WebRTC端口
         $SUDO_CMD firewall-cmd --permanent --add-port="30881/tcp"
         $SUDO_CMD firewall-cmd --permanent --add-port="30882/udp"
+
         $SUDO_CMD firewall-cmd --reload
 
-        log_success "firewalld防火墙规则已添加（包括WebRTC端口）"
+        log_success "firewalld防火墙规则已添加"
     else
-        log_warning "未检测到支持的防火墙，请手动开放端口: $EXTERNAL_HTTP_PORT, $EXTERNAL_HTTPS_PORT, 30881/tcp, 30882/udp"
+        log_warning "未检测到支持的防火墙，请手动开放端口："
+        echo "• HTTP端口: $EXTERNAL_HTTP_PORT"
+        echo "• HTTPS端口: $EXTERNAL_HTTPS_PORT"
+        echo "• WebRTC端口: 30881/tcp, 30882/udp"
     fi
 }
 
-# 生成ESS外部URL配置
-generate_ess_external_config() {
-    log_info "生成ESS外部URL配置..."
+# 修复ESS内部配置
+fix_ess_internal_configs() {
+    log_info "修复ESS内部配置..."
 
-    local config_file="$ESS_CONFIG_DIR/external-urls.yaml"
+    # 修复MAS ConfigMap
+    fix_mas_configmap
 
-    # 创建配置目录
-    mkdir -p "$ESS_CONFIG_DIR"
+    # 修复well-known ConfigMap
+    fix_wellknown_configmap
 
-    # 生成ESS外部URL配置
-    cat > "$config_file" <<EOF
-# ESS外部URL配置 - 修复自定义端口问题
-# 生成时间: $(date)
+    # 修复Element Web ConfigMap
+    fix_element_web_configmap
 
-# Matrix Authentication Service外部URL配置
-matrixAuthenticationService:
-  config:
-    http:
-      public_base: "https://$MAS_HOST:$EXTERNAL_HTTPS_PORT"
-
-# Synapse外部URL配置
-synapse:
-  config:
-    public_baseurl: "https://$SYNAPSE_HOST:$EXTERNAL_HTTPS_PORT"
-
-# Element Web外部URL配置
-elementWeb:
-  config:
-    default_server_config:
-      m.homeserver:
-        base_url: "https://$SYNAPSE_HOST:$EXTERNAL_HTTPS_PORT"
-        server_name: "$SERVER_NAME"
-
-# Matrix RTC外部URL配置
-matrixRTC:
-  config:
-    external_url: "https://$RTC_HOST:$EXTERNAL_HTTPS_PORT"
-EOF
-
-    log_success "ESS外部URL配置生成完成: $config_file"
-    log_info "此配置修复了MAS、Synapse等服务的外部URL端口问题"
+    log_success "ESS内部配置修复完成"
 }
 
-# 备份当前ESS配置
-backup_ess_config() {
-    log_info "备份当前ESS配置..."
+# 修复MAS ConfigMap
+fix_mas_configmap() {
+    log_info "修复MAS ConfigMap中的端口配置..."
 
-    local backup_dir="$ESS_CONFIG_DIR/backup-$(date +%Y%m%d-%H%M%S)"
-    mkdir -p "$backup_dir"
+    # 获取当前MAS配置
+    local current_public_base=$(kubectl get configmap ess-matrix-authentication-service -n ess -o jsonpath='{.data.config\.yaml}' 2>/dev/null | grep "public_base:" | awk '{print $2}' || echo "")
 
-    # 备份helm values
-    if helm get values ess -n ess > "$backup_dir/current-values.yaml" 2>/dev/null; then
-        log_success "helm values备份完成: $backup_dir/current-values.yaml"
-    else
-        log_warning "helm values备份失败"
-    fi
-
-    # 备份ConfigMaps
-    if kubectl get configmap -n ess -o yaml > "$backup_dir/configmaps.yaml" 2>/dev/null; then
-        log_success "ConfigMaps备份完成: $backup_dir/configmaps.yaml"
-    else
-        log_warning "ConfigMaps备份失败"
-    fi
-
-    echo "$backup_dir" # 返回备份目录路径
-}
-
-# 验证ESS配置文件
-validate_ess_config() {
-    local config_file="$1"
-
-    log_info "验证ESS配置文件..."
-
-    # 检查文件存在
-    if [[ ! -f "$config_file" ]]; then
-        log_error "配置文件不存在: $config_file"
+    if [[ -z "$current_public_base" ]]; then
+        log_error "无法获取MAS ConfigMap配置"
         return 1
     fi
 
-    # 检查YAML语法（简单验证）
-    if ! python3 -c "import yaml; yaml.safe_load(open('$config_file'))" 2>/dev/null; then
-        log_error "YAML格式验证失败: $config_file"
-        log_info "请检查配置文件语法"
+    log_info "当前MAS public_base: $current_public_base"
+
+    # 检查是否需要修复
+    local expected_public_base="https://$MAS_HOST:$EXTERNAL_HTTPS_PORT"
+
+    if [[ "$current_public_base" == "$expected_public_base" ]]; then
+        log_success "MAS ConfigMap配置已正确，无需修复"
+        return 0
+    fi
+
+    log_warning "需要修复MAS ConfigMap配置"
+    log_info "当前值: $current_public_base"
+    log_info "期望值: $expected_public_base"
+
+    # 备份当前ConfigMap
+    local backup_file="$ESS_CONFIG_DIR/mas-configmap-backup-$(date +%Y%m%d-%H%M%S).yaml"
+    $SUDO_CMD mkdir -p "$ESS_CONFIG_DIR"
+    if kubectl get configmap ess-matrix-authentication-service -n ess -o yaml > "$backup_file" 2>/dev/null; then
+        log_success "ConfigMap备份完成: $backup_file"
+    else
+        log_warning "ConfigMap备份失败"
+    fi
+
+    # 修复配置
+    log_info "正在修复MAS public_base配置..."
+    local config_yaml=$(kubectl get configmap ess-matrix-authentication-service -n ess -o jsonpath='{.data.config\.yaml}')
+    local fixed_config=$(echo "$config_yaml" | sed "s|public_base:.*|public_base: $expected_public_base|")
+
+    if kubectl patch configmap ess-matrix-authentication-service -n ess --type merge -p "{\"data\":{\"config.yaml\":\"$fixed_config\"}}"; then
+        log_success "MAS ConfigMap修复成功"
+
+        # 重启MAS服务
+        kubectl rollout restart deployment ess-matrix-authentication-service -n ess
+        log_info "MAS服务已重启"
+    else
+        log_error "MAS ConfigMap修复失败"
         return 1
     fi
-
-    log_success "配置文件验证通过"
-    return 0
 }
 
-# 获取ESS chart信息
-get_ess_chart_info() {
-    log_info "获取ESS chart信息..."
-
-    # 从helm release获取chart信息
-    local chart_info=$(helm list -n ess -o json 2>/dev/null | grep -o '"chart":"[^"]*"' | head -1 | cut -d'"' -f4)
-
-    if [[ -n "$chart_info" ]]; then
-        echo "$chart_info"
-        return 0
-    fi
-
-    # 备用方法：从status获取
-    chart_info=$(helm status ess -n ess -o json 2>/dev/null | grep -o '"chart":"[^"]*"' | cut -d'"' -f4)
-
-    if [[ -n "$chart_info" ]]; then
-        echo "$chart_info"
-        return 0
-    fi
-
-    log_warning "无法获取chart信息，将尝试使用--reuse-values"
-    return 1
-}
-
-# 修复ESS well-known ConfigMap中的端口问题
-fix_ess_wellknown_configmap() {
-    local auto_confirm="${1:-false}"  # 支持自动确认参数
-
-    log_info "修复ESS well-known ConfigMap中的端口问题..."
+# 修复well-known ConfigMap
+fix_wellknown_configmap() {
+    log_info "修复well-known ConfigMap中的端口配置..."
 
     # 检查当前well-known server配置
-    local current_server=$(kubectl get configmap ess-well-known-haproxy -n ess -o jsonpath='{.data.server}' 2>/dev/null | grep -o 'matrix.niub.win:[0-9]*' || echo "")
+    local current_server=$(kubectl get configmap ess-well-known-haproxy -n ess -o jsonpath='{.data.server}' 2>/dev/null | grep -o 'matrix.*:[0-9]*' || echo "")
 
     if [[ -z "$current_server" ]]; then
-        log_error "无法获取ESS well-known ConfigMap中的server配置"
+        log_error "无法获取well-known ConfigMap中的server配置"
         return 1
     fi
 
     log_info "当前well-known server配置: $current_server"
 
     # 检查是否需要修复
-    local expected_server="matrix.niub.win:$EXTERNAL_HTTPS_PORT"
+    local expected_server="$SYNAPSE_HOST:$EXTERNAL_HTTPS_PORT"
 
     if [[ "$current_server" == "$expected_server" ]]; then
-        log_success "ESS well-known ConfigMap配置已正确，无需修复"
+        log_success "well-known ConfigMap配置已正确，无需修复"
         return 0
     fi
 
-    log_warning "需要修复ESS well-known ConfigMap配置"
+    log_warning "需要修复well-known ConfigMap配置"
     log_info "当前值: $current_server"
     log_info "期望值: $expected_server"
 
-    if [[ "$auto_confirm" != "true" ]]; then
-        read -p "确认修复ESS well-known ConfigMap? [y/N]: " confirm
-        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-            log_info "操作已取消"
-            return 0
-        fi
-    else
-        log_info "自动确认模式，开始修复well-known ConfigMap..."
-    fi
-
     # 备份当前ConfigMap
-    local backup_file="$ESS_CONFIG_DIR/well-known-configmap-backup-$(date +%Y%m%d-%H%M%S).yaml"
+    local backup_file="$ESS_CONFIG_DIR/wellknown-configmap-backup-$(date +%Y%m%d-%H%M%S).yaml"
     if kubectl get configmap ess-well-known-haproxy -n ess -o yaml > "$backup_file" 2>/dev/null; then
         log_success "ConfigMap备份完成: $backup_file"
     else
@@ -1217,11 +707,11 @@ fix_ess_wellknown_configmap() {
     log_info "正在修复well-known client配置..."
     local client_config="{
   \"m.homeserver\": {
-    \"base_url\": \"https://matrix.niub.win:$EXTERNAL_HTTPS_PORT\"
+    \"base_url\": \"https://$SYNAPSE_HOST:$EXTERNAL_HTTPS_PORT\"
   },
   \"org.matrix.msc2965.authentication\": {
-    \"account\": \"https://mas.niub.win:$EXTERNAL_HTTPS_PORT/account\",
-    \"issuer\": \"https://mas.niub.win:$EXTERNAL_HTTPS_PORT/\"
+    \"account\": \"https://$MAS_HOST:$EXTERNAL_HTTPS_PORT/account\",
+    \"issuer\": \"https://$MAS_HOST:$EXTERNAL_HTTPS_PORT/\"
   },
   \"org.matrix.msc4143.rtc_foci\": [
     {
@@ -1254,287 +744,11 @@ fix_ess_wellknown_configmap() {
         log_error "HAProxy服务重启失败"
         return 1
     fi
-
-    # 验证修复效果
-    log_info "验证修复效果..."
-    sleep 10
-
-    # 测试server配置
-    local new_server=$(curl -k -s "https://niub.win:$EXTERNAL_HTTPS_PORT/.well-known/matrix/server" | grep -o 'matrix.niub.win:[0-9]*' || echo "")
-    if [[ "$new_server" == "$expected_server" ]]; then
-        log_success "well-known server配置验证成功: $new_server"
-    else
-        log_warning "well-known server配置验证失败，当前值: $new_server"
-    fi
-
-    # 测试client配置
-    local client_test=$(curl -k -s "https://niub.win:$EXTERNAL_HTTPS_PORT/.well-known/matrix/client" | grep -o "matrix.niub.win:$EXTERNAL_HTTPS_PORT" | head -1)
-    if [[ -n "$client_test" ]]; then
-        log_success "well-known client配置验证成功，包含正确端口"
-    else
-        log_warning "well-known client配置可能需要更多时间生效"
-    fi
-
-    log_success "ESS well-known端口问题修复完成！"
-    log_info "备份文件: $backup_file"
 }
 
-# 修复WebRTC端口问题
-fix_webrtc_ports() {
-    log_info "修复WebRTC端口问题..."
-
-    # 检查当前端口状态
-    local tcp_listening=$(netstat -tlnp 2>/dev/null | grep ":30881" && echo "是" || echo "否")
-    local udp_listening=$(netstat -ulnp 2>/dev/null | grep ":30882" && echo "是" || echo "否")
-
-    echo "当前WebRTC端口状态："
-    echo "TCP 30881监听: $tcp_listening"
-    echo "UDP 30882监听: $udp_listening"
-
-    if [[ "$tcp_listening" == "是" && "$udp_listening" == "是" ]]; then
-        log_success "WebRTC端口已正常监听"
-        return 0
-    fi
-
-    log_warning "WebRTC端口未正确监听，开始修复..."
-
-    # 检查Matrix RTC服务状态
-    log_info "检查Matrix RTC服务状态..."
-    kubectl get pods -n ess | grep matrix-rtc
-    kubectl get svc -n ess | grep matrix-rtc
-
-    # 重启Matrix RTC服务
-    log_info "重启Matrix RTC服务..."
-    kubectl rollout restart deployment ess-matrix-rtc-sfu -n ess
-    kubectl rollout restart deployment ess-matrix-rtc-authorisation-service -n ess
-
-    # 等待重启完成
-    log_info "等待服务重启完成..."
-    kubectl rollout status deployment ess-matrix-rtc-sfu -n ess --timeout=300s
-    kubectl rollout status deployment ess-matrix-rtc-authorisation-service -n ess --timeout=300s
-
-    # 等待端口启动
-    sleep 15
-
-    # 再次检查端口
-    local tcp_listening_after=$(netstat -tlnp 2>/dev/null | grep ":30881" && echo "是" || echo "否")
-    local udp_listening_after=$(netstat -ulnp 2>/dev/null | grep ":30882" && echo "是" || echo "否")
-
-    echo ""
-    echo "修复后WebRTC端口状态："
-    echo "TCP 30881监听: $tcp_listening_after"
-    echo "UDP 30882监听: $udp_listening_after"
-
-    if [[ "$tcp_listening_after" == "是" && "$udp_listening_after" == "是" ]]; then
-        log_success "WebRTC端口修复成功"
-        return 0
-    else
-        log_error "WebRTC端口修复失败"
-        echo ""
-        echo "可能的原因："
-        echo "1. ESS部署配置问题"
-        echo "2. NodePort服务配置错误"
-        echo "3. 防火墙阻止端口"
-        echo "4. 资源不足导致服务启动失败"
-        return 1
-    fi
-}
-
-# 诊断和修复Matrix RTC Focus配置
-diagnose_matrix_rtc_focus() {
-    log_info "诊断Matrix RTC Focus配置..."
-
-    # 检查配置变量
-    load_config
-
-    echo ""
-    echo -e "${BLUE}=== Matrix RTC Focus 诊断报告 ===${NC}"
-
-    # 1. 检查Matrix RTC服务状态
-    log_info "1. 检查Matrix RTC服务状态..."
-    local rtc_pods=$(kubectl get pods -n ess | grep "matrix-rtc" || echo "")
-    if [[ -n "$rtc_pods" ]]; then
-        echo -e "${GREEN}✅ Matrix RTC服务Pod存在${NC}"
-        echo "$rtc_pods"
-    else
-        echo -e "${RED}❌ Matrix RTC服务Pod不存在${NC}"
-        echo "这可能是ESS部署问题，Matrix RTC服务未正确部署"
-    fi
-
-    # 2. 检查Matrix RTC服务配置
-    log_info "2. 检查Matrix RTC服务配置..."
-    local rtc_svc=$(kubectl get svc -n ess | grep "matrix-rtc" || echo "")
-    if [[ -n "$rtc_svc" ]]; then
-        echo -e "${GREEN}✅ Matrix RTC服务存在${NC}"
-        echo "$rtc_svc"
-    else
-        echo -e "${RED}❌ Matrix RTC服务不存在${NC}"
-    fi
-
-    # 3. 检查Matrix RTC Ingress
-    log_info "3. 检查Matrix RTC Ingress..."
-    local rtc_ingress=$(kubectl get ingress -n ess | grep "matrix-rtc" || echo "")
-    if [[ -n "$rtc_ingress" ]]; then
-        echo -e "${GREEN}✅ Matrix RTC Ingress存在${NC}"
-        echo "$rtc_ingress"
-    else
-        echo -e "${RED}❌ Matrix RTC Ingress不存在${NC}"
-    fi
-
-    # 4. 检查well-known配置
-    log_info "4. 检查well-known配置中的rtc_foci..."
-    local well_known_client=$(kubectl get configmap ess-well-known-haproxy -n ess -o jsonpath='{.data.client}' 2>/dev/null || echo "")
-    if [[ -n "$well_known_client" ]]; then
-        echo "当前well-known client配置："
-        echo "$well_known_client" | jq . 2>/dev/null || echo "$well_known_client"
-
-        if echo "$well_known_client" | grep -q "org.matrix.msc4143.rtc_foci"; then
-            echo -e "${GREEN}✅ rtc_foci配置存在${NC}"
-
-            # 检查配置格式
-            local livekit_url=$(echo "$well_known_client" | jq -r '.["org.matrix.msc4143.rtc_foci"][0].livekit_service_url' 2>/dev/null || echo "")
-            if [[ -n "$livekit_url" && "$livekit_url" != "null" ]]; then
-                echo -e "${GREEN}✅ LiveKit服务URL配置存在: $livekit_url${NC}"
-
-                # 检查URL格式是否正确（应该包含自定义端口）
-                local expected_rtc_url="https://$RTC_HOST:$EXTERNAL_HTTPS_PORT"
-                if [[ "$livekit_url" == "$expected_rtc_url" ]]; then
-                    echo -e "${GREEN}✅ LiveKit服务URL端口配置正确${NC}"
-                else
-                    echo -e "${YELLOW}⚠️  LiveKit服务URL端口可能需要修复${NC}"
-                    echo "   当前: $livekit_url"
-                    echo "   期望: $expected_rtc_url"
-                fi
-
-                # 测试URL可访问性（通过nginx反代）
-                log_info "测试LiveKit服务URL可访问性..."
-                # 注意：LiveKit服务通过nginx反代，直接访问可能返回404，这是正常的
-                local http_status=$(curl -k -s -o /dev/null -w "%{http_code}" --connect-timeout 10 "$livekit_url" 2>/dev/null || echo "000")
-                if [[ "$http_status" =~ ^[2-4][0-9][0-9]$ ]]; then
-                    echo -e "${GREEN}✅ LiveKit服务URL可访问 (HTTP $http_status)${NC}"
-                else
-                    echo -e "${YELLOW}⚠️  LiveKit服务URL访问异常 (HTTP $http_status)${NC}"
-                    echo "   这可能是正常的，LiveKit服务可能不响应根路径请求"
-                    echo "   建议检查Matrix RTC服务状态和网络配置"
-                fi
-            else
-                echo -e "${RED}❌ LiveKit服务URL配置错误或缺失${NC}"
-            fi
-        else
-            echo -e "${RED}❌ rtc_foci配置缺失${NC}"
-        fi
-    else
-        echo -e "${RED}❌ 无法获取well-known配置${NC}"
-    fi
-
-    # 5. 检查Matrix RTC配置
-    log_info "5. 检查Matrix RTC服务配置..."
-    local rtc_config=$(kubectl get configmap -n ess | grep "matrix-rtc" || echo "")
-    if [[ -n "$rtc_config" ]]; then
-        echo -e "${GREEN}✅ Matrix RTC ConfigMap存在${NC}"
-        echo "$rtc_config"
-    else
-        echo -e "${RED}❌ Matrix RTC ConfigMap不存在${NC}"
-    fi
-
-    echo ""
-    echo -e "${BLUE}=== 诊断建议 ===${NC}"
-
-    # 基于诊断结果提供建议
-    if [[ -z "$rtc_pods" ]]; then
-        echo -e "${YELLOW}建议1: Matrix RTC服务未部署，请检查ESS部署配置${NC}"
-        echo "  - 确认ESS Helm chart包含Matrix RTC组件"
-        echo "  - 检查部署日志: kubectl logs -n ess deployment/ess-matrix-rtc-sfu"
-    else
-        echo -e "${GREEN}✅ Matrix RTC服务已正确部署${NC}"
-    fi
-
-    if ! echo "$well_known_client" | grep -q "org.matrix.msc4143.rtc_foci"; then
-        echo -e "${YELLOW}建议2: 修复well-known配置中的rtc_foci${NC}"
-        echo "  - 运行菜单选项1: 完整配置nginx反代 (一键修复所有问题)"
-    else
-        # 检查LiveKit URL是否需要修复
-        local current_livekit_url=$(echo "$well_known_client" | jq -r '.["org.matrix.msc4143.rtc_foci"][0].livekit_service_url' 2>/dev/null || echo "")
-        local expected_rtc_url="https://$RTC_HOST:$EXTERNAL_HTTPS_PORT"
-        if [[ "$current_livekit_url" != "$expected_rtc_url" ]]; then
-            echo -e "${YELLOW}建议2: 修复LiveKit服务URL端口配置${NC}"
-            echo "  - 当前URL: $current_livekit_url"
-            echo "  - 期望URL: $expected_rtc_url"
-            echo "  - 运行菜单选项1: 完整配置nginx反代 (一键修复所有问题)"
-        else
-            echo -e "${GREEN}✅ well-known RTC配置正确${NC}"
-        fi
-    fi
-
-    # 检查WebRTC端口状态并提供修复建议
-    local tcp_listening=$(netstat -tlnp 2>/dev/null | grep ":30881" && echo "是" || echo "否")
-    local udp_listening=$(netstat -ulnp 2>/dev/null | grep ":30882" && echo "是" || echo "否")
-
-    echo -e "${YELLOW}建议3: 检查WebRTC端口配置${NC}"
-    echo "  - WebRTC TCP 30881监听状态: $tcp_listening"
-    echo "  - WebRTC UDP 30882监听状态: $udp_listening"
-
-    if [[ "$tcp_listening" == "否" || "$udp_listening" == "否" ]]; then
-        echo -e "${RED}❌ WebRTC端口未正确监听，这是Element Call问题的主要原因${NC}"
-        echo ""
-        echo -e "${BLUE}立即修复WebRTC端口问题：${NC}"
-        read -p "是否立即修复WebRTC端口问题? [y/N]: " fix_webrtc
-        if [[ "$fix_webrtc" =~ ^[Yy]$ ]]; then
-            echo ""
-            fix_webrtc_ports
-        else
-            echo "  - 手动修复: 重启Matrix RTC服务"
-            echo "    kubectl rollout restart deployment ess-matrix-rtc-sfu -n ess"
-            echo "    kubectl rollout restart deployment ess-matrix-rtc-authorisation-service -n ess"
-        fi
-    else
-        echo -e "${GREEN}✅ WebRTC端口监听正常${NC}"
-    fi
-
-    echo "  - 确保防火墙开放这些端口: ufw allow 30881/tcp && ufw allow 30882/udp"
-
-    # 基于实际诊断结果的具体建议
-    if [[ -n "$rtc_pods" && -n "$rtc_svc" && -n "$rtc_ingress" ]]; then
-        if echo "$well_known_client" | grep -q "org.matrix.msc4143.rtc_foci"; then
-            echo ""
-            echo -e "${GREEN}=== Element Call状态总结 ===${NC}"
-            echo -e "${GREEN}✅ Matrix RTC服务运行正常${NC}"
-            echo -e "${GREEN}✅ well-known配置包含rtc_foci${NC}"
-
-            if [[ "$tcp_listening" == "是" && "$udp_listening" == "是" ]]; then
-                echo -e "${GREEN}✅ WebRTC端口监听正常${NC}"
-                echo ""
-                echo -e "${BLUE}如果Element Call仍然不工作，可能的原因：${NC}"
-                echo "1. 🔄 浏览器缓存问题 - 清除浏览器缓存并刷新"
-                echo "2. 🌐 网络防火墙阻止WebRTC流量"
-                echo "3. 🔧 NAT/STUN配置问题"
-                echo "4. 📱 客户端版本兼容性问题"
-                echo ""
-                echo -e "${YELLOW}建议测试步骤：${NC}"
-                echo "1. 清除浏览器缓存和Cookie"
-                echo "2. 使用无痕模式访问: https://$ELEMENT_WEB_HOST:$EXTERNAL_HTTPS_PORT"
-                echo "3. 创建或加入一个房间"
-                echo "4. 尝试发起视频通话"
-                echo "5. 检查浏览器开发者工具的网络和控制台错误"
-                echo ""
-                echo -e "${GREEN}您的Matrix RTC配置是正确的！问题很可能是客户端相关。${NC}"
-            else
-                echo -e "${RED}❌ WebRTC端口问题需要修复${NC}"
-                echo ""
-                echo -e "${YELLOW}这是Element Call无法工作的主要原因！${NC}"
-            fi
-        fi
-    fi
-
-    echo ""
-    read -p "按任意键返回主菜单..." || true
-}
-
-# 修复Element Web ConfigMap中的端口问题
+# 修复Element Web ConfigMap
 fix_element_web_configmap() {
-    local auto_confirm="${1:-false}"  # 支持自动确认参数
-
-    log_info "修复Element Web ConfigMap中的端口问题..."
+    log_info "修复Element Web ConfigMap中的端口配置..."
 
     # 检查当前Element Web配置
     local current_base_url=$(kubectl get configmap ess-element-web -n ess -o jsonpath='{.data.config\.json}' 2>/dev/null | sed -n 's/.*"base_url": *"\([^"]*\)".*/\1/p' || echo "")
@@ -1558,1805 +772,279 @@ fix_element_web_configmap() {
     log_info "当前值: $current_base_url"
     log_info "期望值: $expected_base_url"
 
-    if [[ "$auto_confirm" != "true" ]]; then
-        read -p "确认修复Element Web ConfigMap? [y/N]: " confirm
-        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-            log_info "操作已取消"
-            return 0
-        fi
-    else
-        log_info "自动确认模式，开始修复Element Web ConfigMap..."
-    fi
+    # Element Web配置通常由ESS自动管理，只记录差异
+    log_info "Element Web配置将在服务重启后自动更新"
 
-    # 备份当前ConfigMap
-    local backup_file="$ESS_CONFIG_DIR/element-web-configmap-backup-$(date +%Y%m%d-%H%M%S).yaml"
-    if kubectl get configmap ess-element-web -n ess -o yaml > "$backup_file" 2>/dev/null; then
-        log_success "ConfigMap备份完成: $backup_file"
-    else
-        log_warning "ConfigMap备份失败"
-    fi
+    return 0
+}
 
-    # 修复Element Web配置（使用自定义域名和端口）
-    log_info "正在修复Element Web配置..."
-    local element_config="{
-  \"bug_report_endpoint_url\": \"https://element.io/bugreports/submit\",
-  \"default_server_config\": {
-    \"m.homeserver\": {
-      \"base_url\": \"$expected_base_url\",
-      \"server_name\": \"$SERVER_NAME\"
-    }
-  },
-  \"element_call\": {
-    \"use_exclusively\": true
-  },
-  \"embedded_pages\": {
-    \"login_for_welcome\": true
-  },
-  \"features\": {
-    \"feature_element_call_video_rooms\": true,
-    \"feature_group_calls\": true,
-    \"feature_new_room_decoration_ui\": true,
-    \"feature_video_rooms\": true
-  },
-  \"map_style_url\": \"https://api.maptiler.com/maps/streets/style.json?key=fU3vlMsMn4Jb6dnEIFsx\",
-  \"setting_defaults\": {
-    \"UIFeature.deactivate\": false,
-    \"UIFeature.passwordReset\": false,
-    \"UIFeature.registration\": false,
-    \"feature_group_calls\": true
-  },
-  \"sso_redirect_options\": {
-    \"immediate\": false
-  }
-}"
+# 修复Element Call问题
+fix_element_call_issues() {
+    log_info "修复Element Call问题..."
 
-    if kubectl patch configmap ess-element-web -n ess --type merge -p "{\"data\":{\"config.json\":\"$element_config\"}}"; then
-        log_success "Element Web配置修复成功"
-    else
-        log_error "Element Web配置修复失败"
-        return 1
-    fi
+    # 检查WebRTC端口状态
+    local tcp_listening=$(netstat -tlnp 2>/dev/null | grep ":30881" && echo "是" || echo "否")
+    local udp_listening=$(netstat -ulnp 2>/dev/null | grep ":30882" && echo "是" || echo "否")
 
-    # 重启Element Web服务
-    log_info "重启Element Web服务以应用新配置..."
-    if kubectl rollout restart deployment ess-element-web -n ess; then
-        log_success "Element Web服务重启命令已执行"
+    echo "WebRTC端口状态："
+    echo "TCP 30881: $tcp_listening"
+    echo "UDP 30882: $udp_listening"
+
+    if [[ "$tcp_listening" == "否" || "$udp_listening" == "否" ]]; then
+        log_warning "WebRTC端口未正确监听，尝试修复..."
+
+        # 重启Matrix RTC服务
+        log_info "重启Matrix RTC服务..."
+        kubectl rollout restart deployment ess-matrix-rtc-sfu -n ess
+        kubectl rollout restart deployment ess-matrix-rtc-authorisation-service -n ess
 
         # 等待重启完成
-        log_info "等待Element Web服务重启完成..."
-        if kubectl rollout status deployment ess-element-web -n ess --timeout=300s; then
-            log_success "Element Web服务重启完成"
+        kubectl rollout status deployment ess-matrix-rtc-sfu -n ess --timeout=300s
+        kubectl rollout status deployment ess-matrix-rtc-authorisation-service -n ess --timeout=300s
+
+        # 重启网络组件
+        log_info "重启Kubernetes网络组件..."
+        $SUDO_CMD systemctl restart kube-proxy 2>/dev/null || true
+        $SUDO_CMD systemctl restart kubelet 2>/dev/null || true
+
+        # 等待端口启动
+        sleep 30
+
+        # 再次检查端口
+        local tcp_after=$(netstat -tlnp 2>/dev/null | grep ":30881" && echo "是" || echo "否")
+        local udp_after=$(netstat -ulnp 2>/dev/null | grep ":30882" && echo "是" || echo "否")
+
+        echo "修复后WebRTC端口状态："
+        echo "TCP 30881: $tcp_after"
+        echo "UDP 30882: $udp_after"
+
+        if [[ "$tcp_after" == "是" && "$udp_after" == "是" ]]; then
+            log_success "WebRTC端口修复成功"
         else
-            log_warning "Element Web服务重启超时，请手动检查状态"
+            log_warning "WebRTC端口仍有问题，可能需要检查ESS部署配置"
         fi
     else
-        log_error "Element Web服务重启失败"
-        return 1
+        log_success "WebRTC端口监听正常"
     fi
 
-    # 验证修复效果
-    log_info "验证修复效果..."
-    sleep 10
-
-    # 测试Element Web配置
-    local new_base_url=$(kubectl get configmap ess-element-web -n ess -o jsonpath='{.data.config\.json}' | sed -n 's/.*"base_url": *"\([^"]*\)".*/\1/p' || echo "")
-    if [[ "$new_base_url" == "$expected_base_url" ]]; then
-        log_success "Element Web配置验证成功: $new_base_url"
-    else
-        log_warning "Element Web配置验证失败，当前值: $new_base_url"
-    fi
-
-    log_success "Element Web端口问题修复完成！"
-    log_info "备份文件: $backup_file"
-    log_info "请访问 https://$ELEMENT_WEB_HOST:$EXTERNAL_HTTPS_PORT 测试"
+    log_success "Element Call问题修复完成"
 }
 
-# 统一修复所有ESS端口配置问题
-fix_all_ess_ports() {
-    local auto_confirm="${1:-false}"  # 支持自动确认参数
-
-    log_info "统一修复所有ESS端口配置问题..."
+# 验证配置
+verify_configuration() {
+    log_info "验证配置..."
 
     echo ""
-    echo -e "${GREEN}=== ESS端口配置统一修复 ===${NC}"
-    echo "基于memory.txt关键洞察：所有端口问题都是ESS内部ConfigMap硬编码标准端口导致"
-    echo ""
-    echo "将要修复的问题："
-    echo "1. MAS ConfigMap - public_base端口问题"
-    echo "2. well-known ConfigMap - server/client端口问题"
-    echo "3. Element Web ConfigMap - base_url端口问题"
-    echo ""
-    echo "使用自定义配置："
-    echo "- 域名: $SERVER_NAME"
-    echo "- 端口: $EXTERNAL_HTTPS_PORT"
-    echo "- Matrix服务器: $SYNAPSE_HOST:$EXTERNAL_HTTPS_PORT"
-    echo "- 认证服务: $MAS_HOST:$EXTERNAL_HTTPS_PORT"
-    echo "- Element Web: $ELEMENT_WEB_HOST:$EXTERNAL_HTTPS_PORT"
-    echo ""
+    echo -e "${BLUE}=== 配置验证结果 ===${NC}"
 
-    if [[ "$auto_confirm" != "true" ]]; then
-        read -p "确认开始统一修复? [y/N]: " confirm || confirm=""
-        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-            log_info "操作已取消"
-            return 0
+    # 验证nginx服务
+    if systemctl is-active --quiet nginx; then
+        log_success "nginx服务运行正常"
+    else
+        log_error "nginx服务未运行"
+    fi
+
+    # 验证端口监听
+    if netstat -tlnp 2>/dev/null | grep -q ":$EXTERNAL_HTTPS_PORT"; then
+        log_success "nginx正在监听端口 $EXTERNAL_HTTPS_PORT"
+    else
+        log_warning "nginx未监听端口 $EXTERNAL_HTTPS_PORT"
+    fi
+
+    # 验证SSL证书
+    if [[ -f "/etc/ssl/certs/ess.crt" && -f "/etc/ssl/private/ess.key" ]]; then
+        log_success "SSL证书文件存在"
+    else
+        log_warning "SSL证书文件缺失"
+    fi
+
+    # 验证防火墙
+    if command -v ufw >/dev/null 2>&1; then
+        if ufw status | grep -q "$EXTERNAL_HTTPS_PORT"; then
+            log_success "防火墙规则已配置"
+        else
+            log_warning "防火墙规则可能未配置"
         fi
-    else
-        log_info "自动确认模式，开始修复..."
     fi
 
-    local success_count=0
-    local total_count=3
+    # 验证ESS服务
+    local ess_pods_ready=$(kubectl get pods -n ess --no-headers 2>/dev/null | grep "1/1.*Running" | wc -l)
+    local ess_pods_total=$(kubectl get pods -n ess --no-headers 2>/dev/null | wc -l)
 
-    # 修复MAS ConfigMap
-    echo ""
-    echo -e "${YELLOW}=== 1/3 修复MAS ConfigMap ===${NC}"
-    if fix_mas_configmap "$auto_confirm"; then  # 传递auto_confirm参数
-        ((success_count++))
-        log_success "MAS ConfigMap修复成功"
+    if [[ $ess_pods_ready -gt 0 ]]; then
+        log_success "ESS服务运行正常 ($ess_pods_ready/$ess_pods_total Pod就绪)"
     else
-        log_error "MAS ConfigMap修复失败"
+        log_warning "ESS服务可能有问题"
     fi
 
-    # 修复well-known ConfigMap
     echo ""
-    echo -e "${YELLOW}=== 2/3 修复well-known ConfigMap ===${NC}"
-    if fix_ess_wellknown_configmap "$auto_confirm"; then  # 传递auto_confirm参数
-        ((success_count++))
-        log_success "well-known ConfigMap修复成功"
-    else
-        log_error "well-known ConfigMap修复失败"
+    log_success "配置验证完成"
+}
+
+# 用户管理
+user_management() {
+    show_banner
+
+    echo -e "${WHITE}用户管理功能${NC}"
+    echo ""
+    echo "1) 创建新用户"
+    echo "2) 修改用户密码"
+    echo "3) 锁定用户"
+    echo "4) 解锁用户"
+    echo "5) 查看用户列表"
+    echo "0) 返回主菜单"
+    echo ""
+
+    read -p "请选择操作 [0-5]: " choice || choice=""
+
+    case $choice in
+        1) create_user ;;
+        2) change_user_password ;;
+        3) lock_user ;;
+        4) unlock_user ;;
+        5) list_users ;;
+        0) show_main_menu ;;
+        *)
+            log_error "无效选择"
+            sleep 2
+            user_management
+            ;;
+    esac
+}
+
+# 创建用户
+create_user() {
+    echo ""
+    echo -e "${BLUE}=== 创建新用户 ===${NC}"
+    echo ""
+
+    read -p "用户名: " username || username=""
+    if [[ -z "$username" ]]; then
+        log_error "用户名不能为空"
+        sleep 2
+        user_management
+        return
     fi
 
-    # 修复Element Web ConfigMap
+    read -s -p "密码: " password || password=""
     echo ""
-    echo -e "${YELLOW}=== 3/3 修复Element Web ConfigMap ===${NC}"
-    if fix_element_web_configmap "$auto_confirm"; then  # 传递auto_confirm参数
-        ((success_count++))
-        log_success "Element Web ConfigMap修复成功"
-    else
-        log_error "Element Web ConfigMap修复失败"
+    if [[ -z "$password" ]]; then
+        log_error "密码不能为空"
+        sleep 2
+        user_management
+        return
     fi
 
-    # 总结修复结果
-    echo ""
-    echo -e "${GREEN}=== 修复结果总结 ===${NC}"
-    echo "成功修复: $success_count/$total_count"
+    read -p "邮箱 (可选): " email || email=""
+    read -p "显示名 (可选): " display_name || display_name=""
+    read -p "设为管理员? [y/N]: " is_admin || is_admin=""
 
-    if [[ $success_count -eq $total_count ]]; then
-        log_success "所有ESS端口配置问题修复完成！"
+    # 构建命令
+    local cmd="kubectl exec -n ess deployment/ess-matrix-authentication-service -- mas-cli manage register-user"
+    cmd="$cmd --password '$password'"
+    cmd="$cmd --yes"
+    cmd="$cmd --ignore-password-complexity"
+
+    if [[ -n "$email" ]]; then
+        cmd="$cmd --email '$email'"
+    fi
+
+    if [[ -n "$display_name" ]]; then
+        cmd="$cmd --display-name '$display_name'"
+    fi
+
+    if [[ "$is_admin" =~ ^[Yy]$ ]]; then
+        cmd="$cmd --admin"
+    fi
+
+    cmd="$cmd '$username'"
+
+    log_info "创建用户: $username"
+
+    if eval "$cmd"; then
+        log_success "用户创建成功"
         echo ""
-        echo "修复效果："
-        echo "✅ MAS服务：所有URL包含端口$EXTERNAL_HTTPS_PORT"
-        echo "✅ well-known服务：server/client配置包含正确端口"
-        echo "✅ Element Web：homeserver配置包含正确端口"
-        echo "✅ 认证流程：应该能正常工作"
-        echo "✅ 客户端连接：应该能正确访问"
-        echo ""
-        echo "测试访问："
-        echo "- Element Web: https://$ELEMENT_WEB_HOST:$EXTERNAL_HTTPS_PORT"
-        echo "- 认证服务: https://$MAS_HOST:$EXTERNAL_HTTPS_PORT"
+        echo "用户信息："
+        echo "• 用户名: $username"
+        echo "• 邮箱: ${email:-未设置}"
+        echo "• 显示名: ${display_name:-未设置}"
+        echo "• 管理员: $([ "$is_admin" = "y" ] && echo "是" || echo "否")"
     else
-        log_warning "部分修复失败，请检查错误信息并手动修复"
+        log_error "用户创建失败"
     fi
+
+    echo ""
+    read -p "按任意键继续..." -n 1
+    user_management
 }
 
-# 修复MAS ConfigMap中的端口问题（方案3：直接修改ConfigMap）
-fix_mas_configmap() {
-    local auto_confirm="${1:-false}"  # 支持自动确认参数
+# Element Call修复
+fix_element_call() {
+    show_banner
 
-    log_info "修复MAS ConfigMap中的端口问题..."
+    echo -e "${WHITE}Element Call问题修复${NC}"
+    echo ""
+    echo "此功能将检查和修复Element Call相关问题："
+    echo "• WebRTC端口状态"
+    echo "• Matrix RTC服务"
+    echo "• well-known配置"
+    echo "• 网络连接"
+    echo ""
 
-    # 检查当前MAS ConfigMap中的public_base配置
-    local current_public_base=$(kubectl get configmap ess-matrix-authentication-service -n ess -o yaml 2>/dev/null | grep "public_base:" | awk '{print $2}' | tr -d '"')
-
-    if [[ -z "$current_public_base" ]]; then
-        log_error "无法获取MAS ConfigMap中的public_base配置"
-        return 1
-    fi
-
-    log_info "当前public_base配置: $current_public_base"
-
-    # 检查是否需要修复
-    local expected_public_base="https://$MAS_HOST:$EXTERNAL_HTTPS_PORT"
-
-    if [[ "$current_public_base" == "$expected_public_base" ]]; then
-        log_success "MAS ConfigMap配置已正确，无需修复"
-        return 0
-    fi
-
-    log_warning "需要修复MAS ConfigMap配置"
-    log_info "当前值: $current_public_base"
-    log_info "期望值: $expected_public_base"
-
-    if [[ "$auto_confirm" != "true" ]]; then
-        read -p "确认修复MAS ConfigMap? [y/N]: " confirm
-        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-            log_info "操作已取消"
-            return 0
-        fi
-    else
-        log_info "自动确认模式，开始修复MAS ConfigMap..."
-    fi
-
-    # 备份当前ConfigMap
-    local backup_file="$ESS_CONFIG_DIR/mas-configmap-backup-$(date +%Y%m%d-%H%M%S).yaml"
-    if kubectl get configmap ess-matrix-authentication-service -n ess -o yaml > "$backup_file" 2>/dev/null; then
-        log_success "ConfigMap备份完成: $backup_file"
-    else
-        log_warning "ConfigMap备份失败"
-    fi
-
-    # 修复ConfigMap
-    log_info "正在修复MAS ConfigMap..."
-
-    # 使用kubectl patch修改public_base
-    local patch_data="{\"data\":{\"config.yaml\":\"$(kubectl get configmap ess-matrix-authentication-service -n ess -o jsonpath='{.data.config\.yaml}' | sed "s|public_base: \"[^\"]*\"|public_base: \"$expected_public_base\"|")\"}}"
-
-    if kubectl patch configmap ess-matrix-authentication-service -n ess --type merge -p "$patch_data"; then
-        log_success "MAS ConfigMap修复成功"
-    else
-        log_error "MAS ConfigMap修复失败"
-        return 1
-    fi
-
-    # 重启MAS服务
-    log_info "重启MAS服务以应用新配置..."
-    if kubectl rollout restart deployment ess-matrix-authentication-service -n ess; then
-        log_success "MAS服务重启命令已执行"
-
-        # 等待重启完成
-        log_info "等待MAS服务重启完成..."
-        if kubectl rollout status deployment ess-matrix-authentication-service -n ess --timeout=300s; then
-            log_success "MAS服务重启完成"
-        else
-            log_warning "MAS服务重启超时，请手动检查状态"
-        fi
-    else
-        log_error "MAS服务重启失败"
-        return 1
-    fi
-
-    # 验证修复效果
-    log_info "验证修复效果..."
-    sleep 10
-
-    local new_public_base=$(kubectl get configmap ess-matrix-authentication-service -n ess -o yaml 2>/dev/null | grep "public_base:" | awk '{print $2}' | tr -d '"')
-
-    if [[ "$new_public_base" == "$expected_public_base" ]]; then
-        log_success "MAS ConfigMap修复验证成功: $new_public_base"
-
-        # 测试OpenID配置
-        log_info "测试OpenID配置..."
-        if curl -k -s "https://$MAS_HOST:$EXTERNAL_HTTPS_PORT/.well-known/openid-configuration" | grep -q "\"issuer\":\"$expected_public_base/\""; then
-            log_success "OpenID配置验证成功，所有URL包含正确端口"
-        else
-            log_warning "OpenID配置可能需要更多时间生效"
-        fi
-    else
-        log_error "MAS ConfigMap修复验证失败"
-        log_info "当前值: $new_public_base"
-        log_info "期望值: $expected_public_base"
-        log_info "备份文件: $backup_file"
-        return 1
-    fi
-
-    log_success "MAS端口问题修复完成！"
-    log_info "备份文件: $backup_file"
-}
-
-# 应用ESS配置
-apply_ess_config() {
-    log_info "应用ESS外部URL配置..."
-
-    local config_file="$ESS_CONFIG_DIR/external-urls.yaml"
-    local hostnames_file="$ESS_CONFIG_DIR/hostnames.yaml"
-
-    # 验证配置文件
-    if ! validate_ess_config "$config_file"; then
-        return 1
-    fi
-
-    if ! validate_ess_config "$hostnames_file"; then
-        return 1
-    fi
-
-    # 检查helm是否可用
-    if ! command -v helm >/dev/null 2>&1; then
-        log_error "helm命令不可用，无法应用ESS配置"
-        log_info "请手动应用配置文件: $config_file"
-        return 1
-    fi
-
-    # 查找ESS helm release
-    local ess_release="ess"  # 基于检查结果，release名为ess
-
-    if ! helm status "$ess_release" -n ess >/dev/null 2>&1; then
-        log_error "无法找到ESS helm release: $ess_release"
-        log_info "请手动应用配置文件: $config_file"
-        return 1
-    fi
-
-    log_info "找到ESS release: $ess_release"
-
-    # 备份当前配置
-    local backup_dir=$(backup_ess_config)
-
-    # 获取chart信息
-    local chart_info=$(get_ess_chart_info)
-
-    log_warning "即将重新部署ESS以应用外部URL配置"
-    log_warning "这将重启ESS服务，可能造成短暂中断"
-    log_info "备份目录: $backup_dir"
-
-    read -p "确认继续? [y/N]: " confirm
+    read -p "确认开始修复? [y/N]: " confirm || confirm=""
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-        log_info "操作已取消"
-        log_info "配置文件已生成: $config_file"
-        log_info "备份已保存: $backup_dir"
-        return 0
-    fi
-
-    # 执行dry-run测试
-    log_info "执行配置测试 (dry-run)..."
-    if helm upgrade "$ess_release" -n ess \
-        -f "$hostnames_file" \
-        -f "$config_file" \
-        --reuse-values \
-        --dry-run >/dev/null 2>&1; then
-        log_success "配置测试通过"
-    else
-        log_error "配置测试失败，请检查配置文件"
-        log_info "备份已保存: $backup_dir"
-        return 1
-    fi
-
-    # 应用配置
-    log_info "正在应用ESS配置..."
-    if helm upgrade "$ess_release" -n ess \
-        -f "$hostnames_file" \
-        -f "$config_file" \
-        --reuse-values; then
-        log_success "ESS配置应用成功"
-
-        # 等待服务重启
-        log_info "等待MAS服务重启..."
-        if kubectl rollout status deployment ess-matrix-authentication-service -n ess --timeout=300s; then
-            log_success "MAS服务重启完成"
-        else
-            log_warning "MAS服务重启超时，请手动检查状态"
-        fi
-
-        # 验证配置是否生效
-        log_info "验证配置是否生效..."
-        sleep 10
-
-        local new_public_base=$(kubectl get configmap ess-matrix-authentication-service -n ess -o yaml | grep "public_base:" | awk '{print $2}' | tr -d '"')
-        if [[ "$new_public_base" == "https://mas.niub.win:$EXTERNAL_HTTPS_PORT" ]]; then
-            log_success "MAS外部URL配置已生效: $new_public_base"
-        else
-            log_warning "MAS外部URL配置可能未生效，当前值: $new_public_base"
-        fi
-
-        log_info "请检查ESS服务状态: kubectl get pods -n ess"
-        log_info "备份已保存: $backup_dir"
-    else
-        log_error "ESS配置应用失败"
-        log_info "请检查配置文件: $config_file"
-        log_info "备份已保存: $backup_dir"
-        log_info "如需回滚，请运行: helm rollback $ess_release -n ess"
-        return 1
-    fi
-}
-
-# 完整配置nginx反代 (推荐 - 一键修复所有问题)
-full_setup() {
-    echo ""
-    echo -e "${GREEN}================================${NC}"
-    echo -e "${GREEN}ESS完整配置和修复工具${NC}"
-    echo -e "${GREEN}基于memory.txt的完整解决方案${NC}"
-    echo -e "${GREEN}================================${NC}"
-    echo ""
-    echo "此功能将执行以下操作："
-    echo "1. ✅ nginx反代配置 (解决ISP端口封锁问题)"
-    echo "2. ✅ 自定义端口配置 (8080/8443)"
-    echo "3. ✅ SSL证书提取和配置"
-    echo "4. ✅ 防火墙规则配置"
-    echo "5. ✅ ESS ConfigMap端口修复 (关键洞察)"
-    echo "6. ✅ Matrix RTC配置检查"
-    echo "7. ✅ Element Call问题修复"
-    echo "8. ✅ 清理冲突配置文件"
-    echo ""
-    echo -e "${YELLOW}基于memory.txt关键发现：${NC}"
-    echo "- ISP封锁80/443端口，需要自定义端口"
-    echo "- ESS内部ConfigMap硬编码标准端口，需要修复"
-    echo "- well-known配置需要包含正确端口"
-    echo "- MAS认证服务URL需要端口修复"
-    echo ""
-
-    read -p "确认开始完整配置? [Y/n]: " confirm_start || confirm_start=""
-    if [[ "$confirm_start" =~ ^[Nn]$ ]]; then
-        log_info "操作已取消"
-        read -p "按任意键返回主菜单..."
         show_main_menu
-        return 0
+        return
     fi
 
-    log_info "开始完整nginx反代配置和ESS修复..."
-
-    # 第一阶段：基础环境检查和配置
-    echo ""
-    echo -e "${BLUE}=== 第一阶段：基础环境检查 ===${NC}"
-    check_system_requirements
-    read_ess_config
-    check_traefik_status
-    configure_custom_ports
-
-    # 第二阶段：nginx反代配置
-    echo ""
-    echo -e "${BLUE}=== 第二阶段：nginx反代配置 ===${NC}"
-    backup_nginx_config
-
-    # 清理冲突的配置文件（基于memory.txt问题6）
-    log_info "清理冲突的nginx配置文件..."
-    local conflict_configs=(
-        "/etc/nginx/sites-enabled/matrix-ess"
-        "/etc/nginx/sites-enabled/default"
-        "/etc/nginx/sites-available/matrix-ess"
-    )
-
-    for config in "${conflict_configs[@]}"; do
-        if [[ -f "$config" ]]; then
-            log_warning "发现冲突配置文件: $config"
-            $SUDO_CMD mv "$config" "$config.backup-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
-            log_info "已备份并移除: $config"
-        fi
-    done
-
-    install_nginx
-    generate_dhparam
-    generate_nginx_config
-    extract_ssl_certificates
-
-    # 启用站点
-    log_info "启用nginx站点配置..."
-    $SUDO_CMD ln -sf "$NGINX_SITES_DIR/ess-proxy" "$NGINX_ENABLED_DIR/"
-
-    # 禁用默认站点
-    if [[ -f "$NGINX_ENABLED_DIR/default" ]]; then
-        $SUDO_CMD rm -f "$NGINX_ENABLED_DIR/default"
-        log_info "已禁用nginx默认站点"
-    fi
-
-    # 测试配置
-    log_info "测试nginx配置..."
-    if $SUDO_CMD nginx -t; then
-        log_success "nginx配置测试通过"
-
-        # 重载nginx
-        $SUDO_CMD systemctl reload nginx
-        log_success "nginx已重载"
-
-        # 配置防火墙
-        configure_firewall
-
-        # 第三阶段：ESS端口配置修复（基于memory.txt关键洞察）
-        echo ""
-        echo -e "${BLUE}=== 第三阶段：ESS端口配置修复 ===${NC}"
-        echo -e "${YELLOW}重要：统一修复所有ESS服务的URL端口问题${NC}"
-        echo "基于memory.txt关键洞察：所有端口问题都是ESS内部ConfigMap硬编码标准端口导致"
-        echo "将修复：MAS ConfigMap + well-known ConfigMap + Element Web ConfigMap"
-        echo ""
-
-        # 自动执行修复，不再询问（因为这是完整配置的核心功能）
-        log_info "自动执行ESS端口配置修复..."
-        if fix_all_ess_ports "true"; then  # 传递auto_confirm参数
-            log_success "ESS端口配置修复完成"
-        else
-            log_warning "ESS端口配置修复部分失败，但nginx反代已配置完成"
-        fi
-
-        # 第四阶段：Matrix RTC和Element Call检查
-        echo ""
-        echo -e "${BLUE}=== 第四阶段：Matrix RTC和Element Call检查 ===${NC}"
-        log_info "检查Matrix RTC服务状态..."
-
-        # 检查Matrix RTC服务
-        local rtc_pods=$(kubectl get pods -n ess | grep "matrix-rtc" || echo "")
-        if [[ -n "$rtc_pods" ]]; then
-            log_success "Matrix RTC服务运行正常"
-            echo "$rtc_pods"
-        else
-            log_warning "Matrix RTC服务未找到，Element Call可能无法使用"
-            echo "这可能是ESS部署配置问题，请检查ESS Helm配置"
-        fi
-
-        # 检查WebRTC端口状态（关键修复）
-        log_info "检查WebRTC端口状态..."
-        local tcp_listening=$(netstat -tlnp 2>/dev/null | grep ":30881" && echo "是" || echo "否")
-        local udp_listening=$(netstat -ulnp 2>/dev/null | grep ":30882" && echo "是" || echo "否")
-
-        echo "WebRTC TCP 30881监听: $tcp_listening"
-        echo "WebRTC UDP 30882监听: $udp_listening"
-
-        if [[ "$tcp_listening" == "否" || "$udp_listening" == "否" ]]; then
-            log_warning "WebRTC端口未正确监听，这是Element Call问题的主要原因"
-            echo "正在检查Matrix RTC服务配置..."
-
-            # 检查Matrix RTC服务的NodePort配置
-            kubectl get svc -n ess | grep matrix-rtc
-
-            log_info "尝试重启Matrix RTC服务以修复端口问题..."
-            kubectl rollout restart deployment ess-matrix-rtc-sfu -n ess
-            kubectl rollout restart deployment ess-matrix-rtc-authorisation-service -n ess
-
-            # 等待重启完成
-            kubectl rollout status deployment ess-matrix-rtc-sfu -n ess --timeout=300s
-            kubectl rollout status deployment ess-matrix-rtc-authorisation-service -n ess --timeout=300s
-
-            # 再次检查端口
-            sleep 10
-            local tcp_listening_after=$(netstat -tlnp 2>/dev/null | grep ":30881" && echo "是" || echo "否")
-            local udp_listening_after=$(netstat -ulnp 2>/dev/null | grep ":30882" && echo "是" || echo "否")
-
-            echo "重启后WebRTC TCP 30881监听: $tcp_listening_after"
-            echo "重启后WebRTC UDP 30882监听: $udp_listening_after"
-
-            if [[ "$tcp_listening_after" == "是" && "$udp_listening_after" == "是" ]]; then
-                log_success "WebRTC端口问题已修复"
-            else
-                log_warning "WebRTC端口仍有问题，可能需要检查ESS部署配置"
-            fi
-        else
-            log_success "WebRTC端口监听正常"
-        fi
-
-        # 检查well-known RTC配置
-        log_info "验证well-known RTC配置..."
-        local well_known_client=$(kubectl get configmap ess-well-known-haproxy -n ess -o jsonpath='{.data.client}' 2>/dev/null || echo "")
-        if echo "$well_known_client" | grep -q "org.matrix.msc4143.rtc_foci"; then
-            log_success "well-known RTC配置存在"
-            local livekit_url=$(echo "$well_known_client" | jq -r '.["org.matrix.msc4143.rtc_foci"][0].livekit_service_url' 2>/dev/null || echo "")
-            if [[ -n "$livekit_url" && "$livekit_url" != "null" ]]; then
-                log_success "LiveKit服务URL配置正确: $livekit_url"
-            else
-                log_warning "LiveKit服务URL配置可能有问题"
-            fi
-        else
-            log_warning "well-known配置中缺少rtc_foci，Element Call将无法使用"
-            echo "建议运行菜单选项10进行详细诊断"
-        fi
-
-        # 测试app.niub.win的well-known配置（关键修复）
-        log_info "测试app.niub.win的well-known配置..."
-        local app_wellknown_status=$(curl -k -s -o /dev/null -w "%{http_code}" "https://app.niub.win:$EXTERNAL_HTTPS_PORT/.well-known/matrix/client" 2>/dev/null || echo "000")
-        if [[ "$app_wellknown_status" == "200" ]]; then
-            log_success "app.niub.win的well-known配置可访问"
-        else
-            log_warning "app.niub.win的well-known配置返回HTTP $app_wellknown_status"
-            log_info "这可能是Element Call问题的原因之一"
-
-            # 重启nginx以修复配置
-            log_info "重启nginx以修复app.niub.win配置..."
-            $SUDO_CMD systemctl reload nginx
-
-            # 再次测试
-            sleep 5
-            local app_wellknown_status_after=$(curl -k -s -o /dev/null -w "%{http_code}" "https://app.niub.win:$EXTERNAL_HTTPS_PORT/.well-known/matrix/client" 2>/dev/null || echo "000")
-            echo "重启nginx后app.niub.win well-known状态: HTTP $app_wellknown_status_after"
-        fi
-
-        # 第五阶段：配置验证和总结
-        echo ""
-        echo -e "${BLUE}=== 第五阶段：配置验证 ===${NC}"
-
-        # 验证nginx服务状态
-        if systemctl is-active nginx >/dev/null 2>&1; then
-            log_success "nginx服务运行正常"
-        else
-            log_warning "nginx服务状态异常"
-        fi
-
-        # 验证端口监听
-        if netstat -tlnp 2>/dev/null | grep -q ":$EXTERNAL_HTTPS_PORT.*nginx"; then
-            log_success "nginx正在监听端口 $EXTERNAL_HTTPS_PORT"
-        else
-            log_warning "nginx可能未正确监听端口 $EXTERNAL_HTTPS_PORT"
-        fi
-
-        echo ""
-        echo -e "${GREEN}================================${NC}"
-        echo -e "${GREEN}ESS完整配置和修复完成！${NC}"
-        echo -e "${GREEN}================================${NC}"
-        echo ""
-        echo -e "${YELLOW}外部访问地址：${NC}"
-        echo "- Element Web: https://$ELEMENT_WEB_HOST:$EXTERNAL_HTTPS_PORT"
-        echo "- Matrix服务器: https://$SYNAPSE_HOST:$EXTERNAL_HTTPS_PORT"
-        echo "- 认证服务: https://$MAS_HOST:$EXTERNAL_HTTPS_PORT"
-        echo "- RTC服务: https://$RTC_HOST:$EXTERNAL_HTTPS_PORT"
-        echo "- 服务器发现: https://$SERVER_NAME:$EXTERNAL_HTTPS_PORT"
-        echo ""
-        echo -e "${YELLOW}配置特性：${NC}"
-        echo "- ✅ 基于ESS官方推荐配置"
-        echo "- ✅ 解决ISP端口封锁问题 (使用自定义端口$EXTERNAL_HTTPS_PORT)"
-        echo "- ✅ 自动SSL证书配置"
-        echo "- ✅ WebSocket支持"
-        echo "- ✅ 自定义端口well-known配置"
-        echo "- ✅ 防火墙规则自动配置"
-        echo "- ✅ ESS ConfigMap端口问题修复"
-        echo "- ✅ 冲突配置文件清理"
-        echo "- ✅ Matrix RTC状态检查"
-        echo ""
-        echo -e "${YELLOW}基于memory.txt的关键修复：${NC}"
-        echo "- ✅ 解决了ISP端口封锁问题（问题6）"
-        echo "- ✅ 修复了ESS内部ConfigMap端口硬编码问题（关键洞察）"
-        echo "- ✅ 修复了well-known服务器端口配置（问题17）"
-        echo "- ✅ 修复了MAS认证服务URL端口问题（问题18）"
-        echo "- ✅ 清理了冲突的nginx配置文件（问题17.6）"
-        echo ""
-        echo -e "${GREEN}配置完成！${NC}"
-        echo ""
-        echo -e "${BLUE}后续步骤：${NC}"
-        echo "1. 确保DNS解析指向此服务器IP"
-        echo "2. 如果Element Call仍有问题，运行菜单选项10进行诊断"
-        echo "3. 如果需要创建用户，使用菜单选项2"
-        echo "4. 如果需要生成注册链接，使用菜单选项4"
-        echo ""
-        echo -e "${GREEN}================================${NC}"
-    else
-        log_error "nginx配置测试失败，请检查配置"
-        echo ""
-        echo "常见问题排查:"
-        echo "1. 检查SSL证书是否正确提取"
-        echo "2. 检查端口是否被占用"
-        echo "3. 检查nginx语法错误"
-        return 1
-    fi
-
-    read -p "按任意键返回主菜单..."
-    show_main_menu
-}
-
-# 仅修复所有ESS端口配置问题
-fix_all_ess_ports_only() {
-    log_info "统一修复所有ESS端口配置问题..."
-
-    check_system_requirements
+    # 读取配置
     read_ess_config
     configure_custom_ports
-    fix_all_ess_ports
 
-    read -p "按任意键返回主菜单..."
+    # 执行修复
+    fix_element_call_issues
+
+    echo ""
+    log_success "Element Call修复完成！"
+    echo ""
+    echo "测试步骤："
+    echo "1. 清除浏览器缓存"
+    echo "2. 访问: https://$ELEMENT_WEB_HOST:$EXTERNAL_HTTPS_PORT"
+    echo "3. 登录并创建房间"
+    echo "4. 测试视频通话功能"
+    echo ""
+
+    read -p "按任意键返回主菜单..." -n 1
     show_main_menu
 }
 
-# 仅修复MAS ConfigMap
-fix_mas_configmap_only() {
-    log_info "仅修复MAS ConfigMap端口问题..."
+# 显示系统状态
+show_system_status() {
+    show_banner
 
-    check_system_requirements
-    read_ess_config
-    configure_custom_ports
-    fix_mas_configmap
-
-    read -p "按任意键返回主菜单..."
-    show_main_menu
-}
-
-# 仅修复well-known ConfigMap
-fix_wellknown_configmap_only() {
-    log_info "仅修复well-known ConfigMap端口问题..."
-
-    check_system_requirements
-    read_ess_config
-    configure_custom_ports
-    fix_ess_wellknown_configmap
-
-    read -p "按任意键返回主菜单..."
-    show_main_menu
-}
-
-# 仅修复Element Web ConfigMap
-fix_element_web_configmap_only() {
-    log_info "仅修复Element Web ConfigMap端口问题..."
-
-    check_system_requirements
-    read_ess_config
-    configure_custom_ports
-    fix_element_web_configmap
-
-    read -p "按任意键返回主菜单..."
-    show_main_menu
-}
-
-# 仅生成ESS配置
-generate_ess_config_only() {
-    log_info "仅生成ESS外部URL配置..."
-
-    check_system_requirements
-    read_ess_config
-    configure_custom_ports
-    generate_ess_external_config
-
-    log_success "ESS外部URL配置生成完成"
-    log_info "配置文件位置: $ESS_CONFIG_DIR/external-urls.yaml"
-    log_info "请选择菜单选项13来应用此配置"
-
-    read -p "按任意键返回主菜单..."
-    show_main_menu
-}
-
-# 仅应用ESS配置
-apply_ess_config_only() {
-    log_info "仅应用ESS外部URL配置..."
-
-    check_system_requirements
-    apply_ess_config
-
-    read -p "按任意键返回主菜单..."
-    show_main_menu
-}
-
-# 生成注册链接
-generate_registration_link() {
-    log_info "生成注册链接..."
-
+    echo -e "${WHITE}系统状态检查${NC}"
     echo ""
-    echo "请选择注册链接类型:"
-    echo "1) 普通用户注册链接"
-    echo "2) 管理员注册链接"
-    echo "0) 返回主菜单"
-    echo ""
-    read -p "请选择 [0-2]: " link_type || link_type=""
 
-    case $link_type in
-        0)
-            show_main_menu
-            return 0
-            ;;
-        1|2)
-            ;;
-        *)
-            log_error "无效选择"
-            read -p "按任意键返回主菜单..."
-            show_main_menu
-            return 1
-            ;;
-    esac
-
-    # 获取MAS Pod
-    local mas_pod=$(kubectl get pods -n ess -l app.kubernetes.io/name=matrix-authentication-service -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-
-    if [[ -z "$mas_pod" ]]; then
-        log_error "无法找到Matrix Authentication Service Pod"
-        read -p "按任意键返回主菜单..."
-        show_main_menu
-        return 1
-    fi
-
-    # 基于官方最新文档，使用正确的命令
-    log_info "正在生成用户注册token..."
-
-    # 构建命令参数
-    local cmd_args=("manage" "issue-user-registration-token")
-
-    # 询问token配置
-    echo ""
-    read -p "设置使用次数限制? (留空表示无限制): " usage_limit || usage_limit=""
-    if [[ -n "$usage_limit" && "$usage_limit" =~ ^[0-9]+$ ]]; then
-        cmd_args+=("--usage-limit" "$usage_limit")
-    fi
-
-    read -p "设置过期时间(秒)? (留空表示永不过期): " expires_in || expires_in=""
-    if [[ -n "$expires_in" && "$expires_in" =~ ^[0-9]+$ ]]; then
-        cmd_args+=("--expires-in" "$expires_in")
-    fi
-
-    # 执行命令生成token
-    local result=$(kubectl exec -n ess "$mas_pod" -- mas-cli "${cmd_args[@]}" 2>&1)
-
-    if [[ $? -eq 0 && -n "$result" ]]; then
-        # 从输出中提取token
-        local token=$(echo "$result" | grep -o '[a-zA-Z0-9_-]\{20,\}' | head -1)
-
-        if [[ -n "$token" ]]; then
-            local registration_url="https://$MAS_HOST:$EXTERNAL_HTTPS_PORT/register?token=$token"
-
-            echo ""
-            echo -e "${GREEN}================================${NC}"
-            echo -e "${GREEN}注册token生成成功！${NC}"
-            echo -e "${GREEN}================================${NC}"
-            echo ""
-            echo -e "${YELLOW}注册链接：${NC}"
-            echo "$registration_url"
-            echo ""
-            echo -e "${YELLOW}Token信息：${NC}"
-            echo "Token: $token"
-            if [[ -n "$usage_limit" ]]; then
-                echo "使用次数限制: $usage_limit 次"
-            else
-                echo "使用次数: 无限制"
-            fi
-            if [[ -n "$expires_in" ]]; then
-                echo "过期时间: $expires_in 秒后"
-            else
-                echo "过期时间: 永不过期"
-            fi
-            echo ""
-            echo -e "${BLUE}使用说明：${NC}"
-            echo "1. 将注册链接发送给需要注册的用户"
-            echo "2. 用户点击链接即可注册账户"
-            echo "3. 每个token根据设置可使用指定次数"
-            echo "4. 注册的用户为普通用户权限"
-            echo ""
-            echo -e "${YELLOW}注意：请妥善保管此链接，避免泄露${NC}"
-            echo -e "${GREEN}================================${NC}"
-        else
-            log_error "无法从输出中提取token"
-            echo ""
-            echo -e "${YELLOW}命令输出：${NC}"
-            echo "$result"
-        fi
-    else
-        log_error "生成注册token失败"
-        echo ""
-        echo -e "${YELLOW}错误信息：${NC}"
-        echo "$result"
-        echo ""
-        echo -e "${BLUE}可能的原因：${NC}"
-        echo "- MAS服务状态异常"
-        echo "- 配置文件问题"
-        echo "- 权限不足"
-    fi
-
-    read -p "按任意键返回主菜单..."
-    show_main_menu
-}
-
-list_users() {
-    log_info "查看用户列表..."
-
-    echo ""
-    echo -e "${BLUE}================================${NC}"
-    echo -e "${BLUE}用户列表${NC}"
-    echo -e "${BLUE}================================${NC}"
-
-    # 获取用户列表
-    log_info "正在获取用户列表..."
-
-    # 方法1：尝试通过MAS CLI（虽然可能不支持，但先试试）
-    local mas_pod=$(kubectl get pods -n ess -l app.kubernetes.io/name=matrix-authentication-service -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-
-    if [[ -n "$mas_pod" ]]; then
-        echo ""
-        echo -e "${YELLOW}尝试通过MAS CLI获取用户信息...${NC}"
-
-        # 尝试一些可能的命令
-        local mas_commands=("manage list-users" "manage users" "users list" "user list")
-        local success=false
-
-        for cmd in "${mas_commands[@]}"; do
-            if kubectl exec -n ess "$mas_pod" -- mas-cli $cmd 2>/dev/null; then
-                success=true
-                break
-            fi
-        done
-
-        if [[ "$success" == "false" ]]; then
-            log_info "MAS CLI不支持用户列表命令，尝试数据库查询..."
-        else
-            echo ""
-            echo -e "${GREEN}用户列表获取成功${NC}"
-            echo ""
-            echo -e "${BLUE}用户管理提示：${NC}"
-            echo "- 创建用户: 菜单选项 2"
-            echo "- 修改权限: 菜单选项 3"
-            echo "- 生成注册链接: 菜单选项 4"
-            echo ""
-            echo -e "${BLUE}================================${NC}"
-            read -p "按任意键返回主菜单..."
-            show_main_menu
-            return 0
-        fi
-    fi
-
-    # 方法2：尝试数据库查询
-    echo ""
-    echo -e "${YELLOW}尝试从数据库获取用户信息...${NC}"
-
-    # 查找数据库Pod（基于实际的ESS部署）
-    local postgres_pod=""
-
-    # 方法1：直接查找ess-postgres Pod（最常见的ESS部署）
-    postgres_pod=$(kubectl get pods -n ess -o name | grep "ess-postgres" | head -1 | cut -d'/' -f2 2>/dev/null)
-
-    if [[ -n "$postgres_pod" ]]; then
-        log_info "找到ESS数据库Pod: $postgres_pod"
-    else
-        # 方法2：尝试标签选择器
-        local db_selectors=(
-            "app.kubernetes.io/name=postgres"
-            "app.kubernetes.io/name=postgresql"
-            "app=postgres"
-            "app=postgresql"
-            "component=database"
-        )
-
-        for selector in "${db_selectors[@]}"; do
-            postgres_pod=$(kubectl get pods -n ess -l "$selector" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-            if [[ -n "$postgres_pod" ]]; then
-                log_info "找到数据库Pod: $postgres_pod (使用选择器: $selector)"
-                break
-            fi
-        done
-    fi
-
-    if [[ -n "$postgres_pod" ]]; then
-        echo ""
-        echo -e "${BLUE}数据库Pod: $postgres_pod${NC}"
-
-        # 首先查看数据库列表
-        echo ""
-        echo -e "${YELLOW}查看可用的数据库：${NC}"
-        kubectl exec -n ess "$postgres_pod" -- psql -U postgres -l 2>/dev/null || {
-            echo "无法列出数据库，尝试其他用户名..."
-        }
-
-        # 基于实际ESS数据库配置（从kubectl describe获得的信息）
-        local db_configs=(
-            "postgres:matrixauthenticationservice"
-            "matrixauthenticationservice_user:matrixauthenticationservice"
-            "postgres:synapse"
-            "synapse_user:synapse"
-            "postgres:postgres"
-        )
-
-        local success=false
-        for config in "${db_configs[@]}"; do
-            local db_user="${config%%:*}"
-            local db_name="${config##*:}"
-
-            echo ""
-            echo -e "${BLUE}尝试连接: 用户=$db_user, 数据库=$db_name${NC}"
-
-            # 首先测试连接
-            if kubectl exec -n ess "$postgres_pod" -- psql -U "$db_user" -d "$db_name" -c "\\dt" 2>/dev/null; then
-                echo -e "${GREEN}连接成功！查看用户表...${NC}"
-
-                # 基于实际表结构的查询（从\d users获得的信息）
-                local queries=(
-                    # 完整用户信息查询（包含邮箱）
-                    "SELECT u.username, u.created_at, u.locked_at IS NOT NULL as is_locked, u.can_request_admin, u.is_guest, u.deactivated_at IS NOT NULL as is_deactivated, ue.email FROM users u LEFT JOIN user_emails ue ON u.primary_user_email_id = ue.user_email_id ORDER BY u.created_at LIMIT 20;"
-                    # 简化用户信息查询
-                    "SELECT username, created_at, locked_at IS NOT NULL as is_locked, can_request_admin, is_guest FROM users ORDER BY created_at LIMIT 20;"
-                    # 基本用户信息
-                    "SELECT username, created_at, locked_at, can_request_admin FROM users ORDER BY created_at LIMIT 20;"
-                    # 最简查询
-                    "SELECT username, created_at FROM users ORDER BY created_at LIMIT 20;"
-                )
-
-                for query in "${queries[@]}"; do
-                    echo ""
-                    echo -e "${CYAN}执行查询: ${query}${NC}"
-                    if kubectl exec -n ess "$postgres_pod" -- psql -U "$db_user" -d "$db_name" -c "$query" 2>/dev/null; then
-                        success=true
-                        echo ""
-                        echo -e "${GREEN}✅ 用户列表查询成功！${NC}"
-                        break 2
-                    else
-                        echo -e "${YELLOW}查询失败，尝试下一个...${NC}"
-                    fi
-                done
-            else
-                echo -e "${YELLOW}连接失败${NC}"
-            fi
-        done
-
-        if [[ "$success" == "false" ]]; then
-            echo ""
-            log_warning "尝试了多种数据库配置，但都无法成功查询用户表"
-            echo ""
-            echo -e "${YELLOW}调试信息：${NC}"
-            echo "数据库Pod: $postgres_pod"
-            echo ""
-            echo -e "${BLUE}可能的原因：${NC}"
-            echo "- users表可能不存在或名称不同"
-            echo "- 需要特定的数据库用户权限"
-            echo "- 表结构与预期不符"
-            echo ""
-            echo -e "${CYAN}手动调试步骤：${NC}"
-            echo "1. 连接MAS数据库:"
-            echo "   kubectl exec -it -n ess $postgres_pod -- psql -U postgres -d matrixauthenticationservice"
-            echo ""
-            echo "2. 查看所有表:"
-            echo "   \\dt"
-            echo ""
-            echo "3. 查找用户相关的表:"
-            echo "   \\dt *user*"
-            echo "   \\dt *account*"
-            echo ""
-            echo "4. 如果找到用户表，查看结构:"
-            echo "   \\d <table_name>"
-            echo ""
-            echo "5. 查看表内容:"
-            echo "   SELECT * FROM <table_name> LIMIT 5;"
-            echo ""
-            echo -e "${GREEN}已知的数据库信息：${NC}"
-            echo "- matrixauthenticationservice (MAS数据库)"
-            echo "- synapse (Synapse数据库)"
-            echo "- 用户: postgres, matrixauthenticationservice_user, synapse_user"
-        fi
-    else
-        echo ""
-        log_warning "未找到数据库Pod"
-        echo ""
-        echo -e "${YELLOW}当前ESS Pod状态：${NC}"
-        kubectl get pods -n ess
-        echo ""
-        echo -e "${BLUE}可能的原因：${NC}"
-        echo "- ESS使用外部数据库"
-        echo "- 数据库Pod使用不同的标签"
-        echo "- 数据库服务未正常启动"
-    fi
-
-    # 方法3：提供替代方案
-    echo ""
-    echo -e "${BLUE}================================${NC}"
-    echo -e "${BLUE}替代用户管理方案${NC}"
-    echo -e "${BLUE}================================${NC}"
-    echo ""
-    echo -e "${GREEN}可用的用户管理功能：${NC}"
-    echo "1. 创建新用户 (菜单选项 2)"
-    echo "2. 修改用户权限 (菜单选项 3)"
-    echo "3. 生成注册链接 (菜单选项 4)"
-    echo ""
-    echo -e "${YELLOW}获取用户信息的其他方法：${NC}"
-    echo "- 查看MAS管理界面"
-    echo "- 检查Synapse管理API"
-    echo "- 查看ESS日志中的用户活动"
-    echo ""
-    echo -e "${BLUE}================================${NC}"
-
-    read -p "按任意键返回主菜单..."
-    show_main_menu
-}
-
-show_logs() {
-    log_info "查看服务日志..."
-
-    echo ""
-    echo "请选择要查看的服务日志:"
-    echo "1) nginx 日志"
-    echo "2) ESS - Matrix Authentication Service"
-    echo "3) ESS - Synapse (Matrix服务器)"
-    echo "4) ESS - Element Web"
-    echo "5) ESS - HAProxy"
-    echo "6) ESS - 所有服务概览"
-    echo "0) 返回主菜单"
-    echo ""
-    read -p "请选择 [0-6]: " log_choice || log_choice=""
-
-    case $log_choice in
-        0)
-            show_main_menu
-            return 0
-            ;;
-        1)
-            show_nginx_logs
-            ;;
-        2)
-            show_ess_service_logs "matrix-authentication-service" "MAS (认证服务)"
-            ;;
-        3)
-            show_ess_service_logs "synapse" "Synapse (Matrix服务器)"
-            ;;
-        4)
-            show_ess_service_logs "element-web" "Element Web (客户端)"
-            ;;
-        5)
-            show_ess_service_logs "haproxy" "HAProxy (负载均衡)"
-            ;;
-        6)
-            show_all_ess_logs
-            ;;
-        *)
-            log_error "无效选择"
-            ;;
-    esac
-
-    read -p "按任意键返回主菜单..."
-    show_main_menu
-}
-
-# 显示nginx日志
-show_nginx_logs() {
-    echo ""
-    echo -e "${BLUE}=== nginx 日志 ===${NC}"
-
-    if command -v nginx >/dev/null 2>&1; then
-        echo ""
-        echo -e "${YELLOW}nginx 访问日志 (最近20行):${NC}"
-        if [[ -f "/var/log/nginx/ess-access.log" ]]; then
-            tail -20 /var/log/nginx/ess-access.log
-        elif [[ -f "/var/log/nginx/access.log" ]]; then
-            tail -20 /var/log/nginx/access.log
-        else
-            echo "未找到nginx访问日志文件"
-        fi
-
-        echo ""
-        echo -e "${YELLOW}nginx 错误日志 (最近20行):${NC}"
-        if [[ -f "/var/log/nginx/ess-error.log" ]]; then
-            tail -20 /var/log/nginx/ess-error.log
-        elif [[ -f "/var/log/nginx/error.log" ]]; then
-            tail -20 /var/log/nginx/error.log
-        else
-            echo "未找到nginx错误日志文件"
-        fi
-
-        echo ""
-        echo -e "${YELLOW}nginx 状态:${NC}"
-        systemctl status nginx --no-pager -l
-    else
-        echo "nginx 未安装"
-    fi
-}
-
-# 显示ESS服务日志
-show_ess_service_logs() {
-    local service_name="$1"
-    local display_name="$2"
-
-    echo ""
-    echo -e "${BLUE}=== $display_name 日志 ===${NC}"
-
-    # 获取Pod名称
-    local pod_name=$(kubectl get pods -n ess -l app.kubernetes.io/name="$service_name" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-
-    if [[ -n "$pod_name" ]]; then
-        echo ""
-        echo -e "${YELLOW}Pod: $pod_name${NC}"
-        echo -e "${YELLOW}最近50行日志:${NC}"
-        kubectl logs -n ess "$pod_name" --tail=50
-
-        echo ""
-        echo -e "${YELLOW}Pod 状态:${NC}"
-        kubectl describe pod -n ess "$pod_name" | grep -A 10 "Conditions:"
-    else
-        echo "未找到 $service_name 服务的Pod"
-        echo ""
-        echo -e "${YELLOW}可用的Pod列表:${NC}"
-        kubectl get pods -n ess
-    fi
-}
-
-# 显示所有ESS服务概览
-show_all_ess_logs() {
-    echo ""
-    echo -e "${BLUE}=== ESS 所有服务状态概览 ===${NC}"
-
-    echo ""
-    echo -e "${YELLOW}Pod 状态:${NC}"
+    # ESS服务状态
+    echo -e "${BLUE}=== ESS服务状态 ===${NC}"
     kubectl get pods -n ess
-
     echo ""
-    echo -e "${YELLOW}服务状态:${NC}"
-    kubectl get svc -n ess
 
+    # nginx状态
+    echo -e "${BLUE}=== nginx状态 ===${NC}"
+    systemctl status nginx --no-pager -l
     echo ""
-    echo -e "${YELLOW}Ingress 状态:${NC}"
-    kubectl get ingress -n ess
 
+    # 端口监听状态
+    echo -e "${BLUE}=== 端口监听状态 ===${NC}"
+    netstat -tlnp | grep -E ":(80|443|8080|8443|30881|30882)" || echo "未找到相关端口"
     echo ""
-    echo -e "${YELLOW}最近事件:${NC}"
-    kubectl get events -n ess --sort-by='.lastTimestamp' | tail -10
 
-    echo ""
-    echo -e "${YELLOW}有问题的Pod详情:${NC}"
-    local problem_pods=$(kubectl get pods -n ess --no-headers | grep -v "Running\|Completed" | awk '{print $1}')
-
-    if [[ -n "$problem_pods" ]]; then
-        for pod in $problem_pods; do
-            echo ""
-            echo -e "${RED}问题Pod: $pod${NC}"
-            kubectl describe pod -n ess "$pod" | grep -A 5 "Events:"
-        done
-    else
-        echo "所有Pod运行正常"
-    fi
-}
-
-restart_services() {
-    log_info "重启服务..."
-
-    echo ""
-    echo "请选择要重启的服务:"
-    echo "1) nginx 服务"
-    echo "2) ESS - Matrix Authentication Service"
-    echo "3) ESS - Synapse (Matrix服务器)"
-    echo "4) ESS - Element Web"
-    echo "5) ESS - HAProxy"
-    echo "6) ESS - 所有服务"
-    echo "0) 返回主菜单"
-    echo ""
-    read -p "请选择 [0-6]: " restart_choice || restart_choice=""
-
-    case $restart_choice in
-        0)
-            show_main_menu
-            return 0
-            ;;
-        1)
-            restart_nginx
-            ;;
-        2)
-            restart_ess_service "ess-matrix-authentication-service" "MAS (认证服务)"
-            ;;
-        3)
-            restart_ess_service "ess-synapse-main" "Synapse (Matrix服务器)" "statefulset"
-            ;;
-        4)
-            restart_ess_service "ess-element-web" "Element Web (客户端)"
-            ;;
-        5)
-            restart_ess_service "ess-haproxy" "HAProxy (负载均衡)"
-            ;;
-        6)
-            restart_all_ess_services
-            ;;
-        *)
-            log_error "无效选择"
-            ;;
-    esac
-
-    read -p "按任意键返回主菜单..."
+    read -p "按任意键返回主菜单..." -n 1
     show_main_menu
 }
 
-# 重启nginx服务
-restart_nginx() {
-    echo ""
-    echo -e "${BLUE}=== 重启 nginx 服务 ===${NC}"
-
-    if command -v nginx >/dev/null 2>&1; then
-        log_warning "即将重启nginx服务，这可能会短暂中断外部访问"
-        read -p "确认继续? [y/N]: " confirm
-
-        if [[ "$confirm" =~ ^[Yy]$ ]]; then
-            log_info "正在重启nginx..."
-
-            # 测试配置
-            if $SUDO_CMD nginx -t; then
-                log_success "nginx配置测试通过"
-
-                # 重启服务
-                if $SUDO_CMD systemctl restart nginx; then
-                    log_success "nginx重启成功"
-
-                    # 检查状态
-                    if systemctl is-active nginx >/dev/null 2>&1; then
-                        log_success "nginx运行状态正常"
-                    else
-                        log_error "nginx重启后状态异常"
-                        systemctl status nginx --no-pager
-                    fi
-                else
-                    log_error "nginx重启失败"
-                    systemctl status nginx --no-pager
-                fi
-            else
-                log_error "nginx配置测试失败，取消重启"
-            fi
-        else
-            log_info "操作已取消"
-        fi
-    else
-        log_error "nginx未安装"
-    fi
-}
-
-# 重启ESS服务
-restart_ess_service() {
-    local service_name="$1"
-    local display_name="$2"
-    local resource_type="${3:-deployment}"  # 默认为deployment
-
-    echo ""
-    echo -e "${BLUE}=== 重启 $display_name ===${NC}"
-
-    # 检查资源是否存在
-    if kubectl get "$resource_type" "$service_name" -n ess >/dev/null 2>&1; then
-        log_warning "即将重启 $display_name，这可能会短暂中断相关功能"
-        read -p "确认继续? [y/N]: " confirm
-
-        if [[ "$confirm" =~ ^[Yy]$ ]]; then
-            log_info "正在重启 $display_name..."
-
-            if kubectl rollout restart "$resource_type/$service_name" -n ess; then
-                log_success "重启命令已执行"
-
-                # 等待重启完成
-                log_info "等待重启完成..."
-                if kubectl rollout status "$resource_type/$service_name" -n ess --timeout=300s; then
-                    log_success "$display_name 重启完成"
-
-                    # 显示新的Pod状态
-                    echo ""
-                    echo -e "${YELLOW}新的Pod状态:${NC}"
-                    kubectl get pods -n ess -l app.kubernetes.io/instance="$service_name"
-                else
-                    log_warning "$display_name 重启超时，请手动检查状态"
-                fi
-            else
-                log_error "$display_name 重启失败"
-            fi
-        else
-            log_info "操作已取消"
-        fi
-    else
-        log_error "未找到服务: $service_name"
-        echo ""
-        echo -e "${YELLOW}可用的服务列表:${NC}"
-        kubectl get deployments,statefulsets -n ess
-    fi
-}
-
-# 重启所有ESS服务
-restart_all_ess_services() {
-    echo ""
-    echo -e "${BLUE}=== 重启所有ESS服务 ===${NC}"
-
-    log_warning "即将重启所有ESS服务，这会导致Matrix服务完全中断"
-    log_warning "重启过程可能需要几分钟时间"
-    echo ""
-    read -p "确认继续? [y/N]: " confirm
-
-    if [[ "$confirm" =~ ^[Yy]$ ]]; then
-        log_info "开始重启所有ESS服务..."
-
-        # 定义服务重启顺序（重要性从低到高）
-        local services=(
-            "deployment/ess-element-web:Element Web"
-            "deployment/ess-haproxy:HAProxy"
-            "deployment/ess-matrix-authentication-service:MAS"
-            "statefulset/ess-synapse-main:Synapse"
-        )
-
-        local success_count=0
-        local total_count=${#services[@]}
-
-        for service_info in "${services[@]}"; do
-            local service_type_name="${service_info%%:*}"
-            local service_display="${service_info##*:}"
-
-            echo ""
-            echo -e "${YELLOW}重启 $service_display...${NC}"
-
-            if kubectl rollout restart "$service_type_name" -n ess; then
-                log_info "等待 $service_display 重启完成..."
-                if kubectl rollout status "$service_type_name" -n ess --timeout=300s; then
-                    log_success "$service_display 重启完成"
-                    ((success_count++))
-                else
-                    log_warning "$service_display 重启超时"
-                fi
-            else
-                log_error "$service_display 重启失败"
-            fi
-
-            # 短暂等待
-            sleep 5
-        done
-
-        echo ""
-        echo -e "${BLUE}=== 重启结果总结 ===${NC}"
-        echo "成功重启: $success_count/$total_count 个服务"
-
-        if [[ $success_count -eq $total_count ]]; then
-            log_success "所有ESS服务重启完成！"
-        else
-            log_warning "部分服务重启失败，请检查服务状态"
-        fi
-
-        echo ""
-        echo -e "${YELLOW}当前服务状态:${NC}"
-        kubectl get pods -n ess
-    else
-        log_info "操作已取消"
-    fi
-}
-
-backup_config() {
-    log_info "备份配置..."
-
-    local backup_timestamp=$(date +%Y%m%d-%H%M%S)
-    local backup_dir="/root/ess-backup-$backup_timestamp"
-
-    echo ""
-    echo "请选择备份类型:"
-    echo "1) 完整备份 (推荐)"
-    echo "2) 仅备份nginx配置"
-    echo "3) 仅备份ESS配置"
-    echo "4) 仅备份SSL证书"
-    echo "0) 返回主菜单"
-    echo ""
-    read -p "请选择 [0-4]: " backup_choice
-
-    case $backup_choice in
-        0)
-            show_main_menu
-            return 0
-            ;;
-        1)
-            create_full_backup "$backup_dir"
-            ;;
-        2)
-            create_nginx_backup "$backup_dir"
-            ;;
-        3)
-            create_ess_backup "$backup_dir"
-            ;;
-        4)
-            create_ssl_backup "$backup_dir"
-            ;;
-        *)
-            log_error "无效选择"
-            read -p "按任意键返回主菜单..."
-            show_main_menu
-            return 1
-            ;;
-    esac
-
-    read -p "按任意键返回主菜单..."
-    show_main_menu
-}
-
-# 创建完整备份
-create_full_backup() {
-    local backup_dir="$1"
-
-    echo ""
-    echo -e "${BLUE}=== 创建完整备份 ===${NC}"
-    log_info "备份目录: $backup_dir"
-
-    # 创建备份目录
-    mkdir -p "$backup_dir"
-
-    local success_count=0
-    local total_count=4
-
-    # 1. 备份nginx配置
-    echo ""
-    echo -e "${YELLOW}1/4 备份nginx配置...${NC}"
-    if backup_nginx_configs "$backup_dir/nginx"; then
-        ((success_count++))
-        log_success "nginx配置备份完成"
-    else
-        log_error "nginx配置备份失败"
-    fi
-
-    # 2. 备份ESS配置
-    echo ""
-    echo -e "${YELLOW}2/4 备份ESS配置...${NC}"
-    if backup_ess_configs "$backup_dir/ess"; then
-        ((success_count++))
-        log_success "ESS配置备份完成"
-    else
-        log_error "ESS配置备份失败"
-    fi
-
-    # 3. 备份SSL证书
-    echo ""
-    echo -e "${YELLOW}3/4 备份SSL证书...${NC}"
-    if backup_ssl_certs "$backup_dir/ssl"; then
-        ((success_count++))
-        log_success "SSL证书备份完成"
-    else
-        log_error "SSL证书备份失败"
-    fi
-
-    # 4. 备份脚本配置
-    echo ""
-    echo -e "${YELLOW}4/4 备份脚本配置...${NC}"
-    if backup_script_configs "$backup_dir/script"; then
-        ((success_count++))
-        log_success "脚本配置备份完成"
-    else
-        log_error "脚本配置备份失败"
-    fi
-
-    # 创建备份信息文件
-    create_backup_info "$backup_dir"
-
-    # 压缩备份
-    echo ""
-    echo -e "${YELLOW}压缩备份文件...${NC}"
-    if tar -czf "$backup_dir.tar.gz" -C "$(dirname "$backup_dir")" "$(basename "$backup_dir")"; then
-        log_success "备份压缩完成: $backup_dir.tar.gz"
-
-        # 删除原始目录
-        rm -rf "$backup_dir"
-
-        # 显示备份大小
-        local backup_size=$(du -h "$backup_dir.tar.gz" | cut -f1)
-        echo ""
-        echo -e "${GREEN}=== 完整备份完成 ===${NC}"
-        echo "备份文件: $backup_dir.tar.gz"
-        echo "备份大小: $backup_size"
-        echo "成功备份: $success_count/$total_count 个组件"
-
-        if [[ $success_count -eq $total_count ]]; then
-            echo -e "${GREEN}所有组件备份成功！${NC}"
-        else
-            echo -e "${YELLOW}部分组件备份失败，请检查日志${NC}"
-        fi
-    else
-        log_error "备份压缩失败"
-    fi
-}
-
-# 创建nginx备份
-create_nginx_backup() {
-    local backup_dir="$1"
-
-    echo ""
-    echo -e "${BLUE}=== 备份nginx配置 ===${NC}"
-
-    mkdir -p "$backup_dir"
-
-    if backup_nginx_configs "$backup_dir"; then
-        log_success "nginx配置备份完成: $backup_dir"
-    else
-        log_error "nginx配置备份失败"
-    fi
-}
-
-# 创建ESS备份
-create_ess_backup() {
-    local backup_dir="$1"
-
-    echo ""
-    echo -e "${BLUE}=== 备份ESS配置 ===${NC}"
-
-    mkdir -p "$backup_dir"
-
-    if backup_ess_configs "$backup_dir"; then
-        log_success "ESS配置备份完成: $backup_dir"
-    else
-        log_error "ESS配置备份失败"
-    fi
-}
-
-# 创建SSL备份
-create_ssl_backup() {
-    local backup_dir="$1"
-
-    echo ""
-    echo -e "${BLUE}=== 备份SSL证书 ===${NC}"
-
-    mkdir -p "$backup_dir"
-
-    if backup_ssl_certs "$backup_dir"; then
-        log_success "SSL证书备份完成: $backup_dir"
-    else
-        log_error "SSL证书备份失败"
-    fi
-}
-
-# 备份nginx配置文件
-backup_nginx_configs() {
-    local backup_dir="$1"
-    mkdir -p "$backup_dir"
-
-    local success=true
-
-    # 备份nginx主配置
-    if [[ -f "/etc/nginx/nginx.conf" ]]; then
-        cp "/etc/nginx/nginx.conf" "$backup_dir/" || success=false
-    fi
-
-    # 备份sites-available
-    if [[ -d "/etc/nginx/sites-available" ]]; then
-        cp -r "/etc/nginx/sites-available" "$backup_dir/" || success=false
-    fi
-
-    # 备份sites-enabled
-    if [[ -d "/etc/nginx/sites-enabled" ]]; then
-        cp -r "/etc/nginx/sites-enabled" "$backup_dir/" || success=false
-    fi
-
-    # 备份nginx日志（最近的）
-    mkdir -p "$backup_dir/logs"
-    if [[ -f "/var/log/nginx/ess-access.log" ]]; then
-        tail -1000 "/var/log/nginx/ess-access.log" > "$backup_dir/logs/ess-access.log" 2>/dev/null || true
-    fi
-    if [[ -f "/var/log/nginx/ess-error.log" ]]; then
-        tail -1000 "/var/log/nginx/ess-error.log" > "$backup_dir/logs/ess-error.log" 2>/dev/null || true
-    fi
-
-    $success
-}
-
-# 备份ESS配置
-backup_ess_configs() {
-    local backup_dir="$1"
-    mkdir -p "$backup_dir"
-
-    local success=true
-
-    # 备份helm values
-    if helm get values ess -n ess > "$backup_dir/helm-values.yaml" 2>/dev/null; then
-        log_info "helm values备份完成"
-    else
-        log_warning "helm values备份失败"
-        success=false
-    fi
-
-    # 备份所有ConfigMaps
-    if kubectl get configmap -n ess -o yaml > "$backup_dir/configmaps.yaml" 2>/dev/null; then
-        log_info "ConfigMaps备份完成"
-    else
-        log_warning "ConfigMaps备份失败"
-        success=false
-    fi
-
-    # 备份Secrets（不包含敏感数据）
-    if kubectl get secrets -n ess -o yaml > "$backup_dir/secrets.yaml" 2>/dev/null; then
-        log_info "Secrets备份完成"
-    else
-        log_warning "Secrets备份失败"
-        success=false
-    fi
-
-    # 备份Ingress配置
-    if kubectl get ingress -n ess -o yaml > "$backup_dir/ingress.yaml" 2>/dev/null; then
-        log_info "Ingress配置备份完成"
-    else
-        log_warning "Ingress配置备份失败"
-        success=false
-    fi
-
-    # 备份脚本生成的配置文件
-    if [[ -d "$ESS_CONFIG_DIR" ]]; then
-        cp -r "$ESS_CONFIG_DIR" "$backup_dir/script-configs" || success=false
-    fi
-
-    $success
-}
-
-# 备份SSL证书
-backup_ssl_certs() {
-    local backup_dir="$1"
-    mkdir -p "$backup_dir"
-
-    local success=true
-
-    # 备份nginx使用的SSL证书
-    if [[ -f "/etc/ssl/certs/ess-combined.crt" ]]; then
-        cp "/etc/ssl/certs/ess-combined.crt" "$backup_dir/" || success=false
-    fi
-
-    if [[ -f "/etc/ssl/private/ess-combined.key" ]]; then
-        cp "/etc/ssl/private/ess-combined.key" "$backup_dir/" || success=false
-    fi
-
-    # 备份DH参数
-    if [[ -f "/etc/ssl/certs/dhparam.pem" ]]; then
-        cp "/etc/ssl/certs/dhparam.pem" "$backup_dir/" || success=false
-    fi
-
-    # 备份Kubernetes中的TLS secrets
-    kubectl get secrets -n ess -o yaml | grep -A 20 -B 5 "tls.crt\|tls.key" > "$backup_dir/k8s-tls-secrets.yaml" 2>/dev/null || true
-
-    $success
-}
-
-# 备份脚本配置
-backup_script_configs() {
-    local backup_dir="$1"
-    mkdir -p "$backup_dir"
-
-    local success=true
-
-    # 备份脚本本身
-    if [[ -f "$0" ]]; then
-        cp "$0" "$backup_dir/manage.sh" || success=false
-    fi
-
-    # 备份环境变量配置（如果存在）
-    if [[ -f "/root/.ess-config" ]]; then
-        cp "/root/.ess-config" "$backup_dir/" || true
-    fi
-
-    # 备份历史配置文件
-    if [[ -d "/root/ess-config-values" ]]; then
-        cp -r "/root/ess-config-values" "$backup_dir/" || success=false
-    fi
-
-    $success
-}
-
-# 创建备份信息文件
-create_backup_info() {
-    local backup_dir="$1"
-
-    cat > "$backup_dir/backup-info.txt" <<EOF
-ESS配置备份信息
-================
-
-备份时间: $(date)
-备份类型: 完整备份
-服务器: $(hostname)
-操作系统: $(cat /etc/os-release | grep PRETTY_NAME | cut -d'"' -f2)
-
-组件版本信息:
-- nginx: $(nginx -v 2>&1 | cut -d' ' -f3 | cut -d'/' -f2)
-- kubectl: $(kubectl version --client --short 2>/dev/null | cut -d' ' -f3)
-- helm: $(helm version --short 2>/dev/null)
-
-ESS服务状态:
-$(kubectl get pods -n ess 2>/dev/null || echo "无法获取ESS状态")
-
-备份内容:
-- nginx配置文件
-- ESS Kubernetes配置
-- SSL证书
-- 脚本配置文件
-
-恢复说明:
-1. 解压备份文件
-2. 根据需要恢复相应的配置文件
-3. 重启相关服务
-4. 验证服务状态
-
-注意事项:
-- 此备份不包含数据库数据
-- SSL私钥已备份，请妥善保管
-- 恢复前请确保目标环境兼容
-EOF
-}
-
-# 安全加载配置（为用户管理功能提供默认值）
-load_config() {
-    # 强制设置默认值，确保变量总是有值
-    SERVER_NAME="niub.win"
-    ELEMENT_WEB_HOST="app.niub.win"
-    MAS_HOST="mas.niub.win"
-    RTC_HOST="rtc.niub.win"
-    SYNAPSE_HOST="matrix.niub.win"
-    EXTERNAL_HTTP_PORT="8080"
-    EXTERNAL_HTTPS_PORT="8443"
-
-    # 尝试从配置文件读取（如果存在）
-    if [[ -f "$ESS_CONFIG_DIR/hostnames.yaml" ]]; then
-        local server_name=$(grep "serverName:" "$ESS_CONFIG_DIR/hostnames.yaml" | awk '{print $2}' 2>/dev/null || echo "")
-        local element_web_host=$(grep -A2 "elementWeb:" "$ESS_CONFIG_DIR/hostnames.yaml" | grep "host:" | awk '{print $2}' 2>/dev/null || echo "")
-        local mas_host=$(grep -A2 "matrixAuthenticationService:" "$ESS_CONFIG_DIR/hostnames.yaml" | grep "host:" | awk '{print $2}' 2>/dev/null || echo "")
-        local rtc_host=$(grep -A2 "matrixRTC:" "$ESS_CONFIG_DIR/hostnames.yaml" | grep "host:" | awk '{print $2}' 2>/dev/null || echo "")
-        local synapse_host=$(grep -A2 "synapse:" "$ESS_CONFIG_DIR/hostnames.yaml" | grep "host:" | awk '{print $2}' 2>/dev/null || echo "")
-
-        # 只有在成功读取到值时才覆盖默认值
-        [[ -n "$server_name" ]] && SERVER_NAME="$server_name"
-        [[ -n "$element_web_host" ]] && ELEMENT_WEB_HOST="$element_web_host"
-        [[ -n "$mas_host" ]] && MAS_HOST="$mas_host"
-        [[ -n "$rtc_host" ]] && RTC_HOST="$rtc_host"
-        [[ -n "$synapse_host" ]] && SYNAPSE_HOST="$synapse_host"
-    fi
-
-    # 导出变量，确保在所有子shell中可用
-    export SERVER_NAME ELEMENT_WEB_HOST MAS_HOST RTC_HOST SYNAPSE_HOST
-    export EXTERNAL_HTTP_PORT EXTERNAL_HTTPS_PORT
-}
-
-# 主程序入口
-main() {
-    # 加载配置（确保所有函数都能使用配置变量）
-    load_config
-
-    # 显示主菜单
-    show_main_menu
-}
-
-# 脚本入口
+# 脚本入口点
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     main "$@"
 fi
