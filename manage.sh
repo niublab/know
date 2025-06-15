@@ -1437,7 +1437,7 @@ fix_element_web_configmap() {
     log_info "修复Element Web ConfigMap中的端口问题..."
 
     # 检查当前Element Web配置
-    local current_base_url=$(kubectl get configmap ess-element-web -n ess -o jsonpath='{.data.config\.json}' 2>/dev/null | grep -o '"base_url":"[^"]*"' | cut -d'"' -f4 || echo "")
+    local current_base_url=$(kubectl get configmap ess-element-web -n ess -o jsonpath='{.data.config\.json}' 2>/dev/null | sed -n 's/.*"base_url": *"\([^"]*\)".*/\1/p' || echo "")
 
     if [[ -z "$current_base_url" ]]; then
         log_error "无法获取Element Web ConfigMap中的base_url配置"
@@ -1539,7 +1539,7 @@ fix_element_web_configmap() {
     sleep 10
 
     # 测试Element Web配置
-    local new_base_url=$(kubectl get configmap ess-element-web -n ess -o jsonpath='{.data.config\.json}' | grep -o '"base_url":"[^"]*"' | cut -d'"' -f4 || echo "")
+    local new_base_url=$(kubectl get configmap ess-element-web -n ess -o jsonpath='{.data.config\.json}' | sed -n 's/.*"base_url": *"\([^"]*\)".*/\1/p' || echo "")
     if [[ "$new_base_url" == "$expected_base_url" ]]; then
         log_success "Element Web配置验证成功: $new_base_url"
     else
