@@ -265,9 +265,12 @@ show_main_menu() {
     echo "8) 重启服务"
     echo "9) 备份配置"
     echo ""
+    echo -e "${GREEN}=== 故障排除 ===${NC}"
+    echo "10) 诊断Matrix RTC Focus (Element Call问题)"
+    echo ""
     echo "0) 退出"
     echo ""
-    read -p "请输入选择 [0-9]: " choice || choice=""
+    read -p "请输入选择 [0-10]: " choice || choice=""
 
     case $choice in
         1) full_setup ;;
@@ -279,9 +282,10 @@ show_main_menu() {
         7) show_logs ;;
         8) restart_services ;;
         9) backup_config ;;
+        10) diagnose_matrix_rtc_focus ;;
         0) exit 0 ;;
         *)
-            log_error "无效选择，请输入有效选项 [0-9]"
+            log_error "无效选择，请输入有效选项 [0-10]"
             sleep 2
             show_main_menu
             ;;
@@ -1207,8 +1211,8 @@ fix_ess_wellknown_configmap() {
   },
   \"org.matrix.msc4143.rtc_foci\": [
     {
-      \"livekit_service_url\": \"https://rtc.niub.win:$EXTERNAL_HTTPS_PORT\",
-      \"type\": \"livekit\"
+      \"type\": \"livekit\",
+      \"livekit_service_url\": \"https://$RTC_HOST:$EXTERNAL_HTTPS_PORT\"
     }
   ]
 }"
@@ -1324,8 +1328,8 @@ fix_ess_wellknown_configmap() {
   },
   \"org.matrix.msc4143.rtc_foci\": [
     {
-      \"livekit_service_url\": \"https://rtc.niub.win:$EXTERNAL_HTTPS_PORT\",
-      \"type\": \"livekit\"
+      \"type\": \"livekit\",
+      \"livekit_service_url\": \"https://$RTC_HOST:$EXTERNAL_HTTPS_PORT\"
     }
   ]
 }"
@@ -1376,6 +1380,114 @@ fix_ess_wellknown_configmap() {
 
     log_success "ESS well-known端口问题修复完成！"
     log_info "备份文件: $backup_file"
+}
+
+# 诊断和修复Matrix RTC Focus配置
+diagnose_matrix_rtc_focus() {
+    log_info "诊断Matrix RTC Focus配置..."
+
+    # 检查配置变量
+    load_config
+
+    echo ""
+    echo -e "${BLUE}=== Matrix RTC Focus 诊断报告 ===${NC}"
+
+    # 1. 检查Matrix RTC服务状态
+    log_info "1. 检查Matrix RTC服务状态..."
+    local rtc_pods=$(kubectl get pods -n ess | grep "matrix-rtc" || echo "")
+    if [[ -n "$rtc_pods" ]]; then
+        echo -e "${GREEN}✅ Matrix RTC服务Pod存在${NC}"
+        echo "$rtc_pods"
+    else
+        echo -e "${RED}❌ Matrix RTC服务Pod不存在${NC}"
+        echo "这可能是ESS部署问题，Matrix RTC服务未正确部署"
+    fi
+
+    # 2. 检查Matrix RTC服务配置
+    log_info "2. 检查Matrix RTC服务配置..."
+    local rtc_svc=$(kubectl get svc -n ess | grep "matrix-rtc" || echo "")
+    if [[ -n "$rtc_svc" ]]; then
+        echo -e "${GREEN}✅ Matrix RTC服务存在${NC}"
+        echo "$rtc_svc"
+    else
+        echo -e "${RED}❌ Matrix RTC服务不存在${NC}"
+    fi
+
+    # 3. 检查Matrix RTC Ingress
+    log_info "3. 检查Matrix RTC Ingress..."
+    local rtc_ingress=$(kubectl get ingress -n ess | grep "matrix-rtc" || echo "")
+    if [[ -n "$rtc_ingress" ]]; then
+        echo -e "${GREEN}✅ Matrix RTC Ingress存在${NC}"
+        echo "$rtc_ingress"
+    else
+        echo -e "${RED}❌ Matrix RTC Ingress不存在${NC}"
+    fi
+
+    # 4. 检查well-known配置
+    log_info "4. 检查well-known配置中的rtc_foci..."
+    local well_known_client=$(kubectl get configmap ess-well-known-haproxy -n ess -o jsonpath='{.data.client}' 2>/dev/null || echo "")
+    if [[ -n "$well_known_client" ]]; then
+        echo "当前well-known client配置："
+        echo "$well_known_client" | jq . 2>/dev/null || echo "$well_known_client"
+
+        if echo "$well_known_client" | grep -q "org.matrix.msc4143.rtc_foci"; then
+            echo -e "${GREEN}✅ rtc_foci配置存在${NC}"
+
+            # 检查配置格式
+            local livekit_url=$(echo "$well_known_client" | jq -r '.["org.matrix.msc4143.rtc_foci"][0].livekit_service_url' 2>/dev/null || echo "")
+            if [[ -n "$livekit_url" && "$livekit_url" != "null" ]]; then
+                echo -e "${GREEN}✅ LiveKit服务URL配置正确: $livekit_url${NC}"
+
+                # 测试URL可访问性
+                log_info "测试LiveKit服务URL可访问性..."
+                if curl -s --connect-timeout 10 "$livekit_url" >/dev/null 2>&1; then
+                    echo -e "${GREEN}✅ LiveKit服务URL可访问${NC}"
+                else
+                    echo -e "${RED}❌ LiveKit服务URL不可访问${NC}"
+                    echo "这可能是端口配置或网络问题"
+                fi
+            else
+                echo -e "${RED}❌ LiveKit服务URL配置错误或缺失${NC}"
+            fi
+        else
+            echo -e "${RED}❌ rtc_foci配置缺失${NC}"
+        fi
+    else
+        echo -e "${RED}❌ 无法获取well-known配置${NC}"
+    fi
+
+    # 5. 检查Matrix RTC配置
+    log_info "5. 检查Matrix RTC服务配置..."
+    local rtc_config=$(kubectl get configmap -n ess | grep "matrix-rtc" || echo "")
+    if [[ -n "$rtc_config" ]]; then
+        echo -e "${GREEN}✅ Matrix RTC ConfigMap存在${NC}"
+        echo "$rtc_config"
+    else
+        echo -e "${RED}❌ Matrix RTC ConfigMap不存在${NC}"
+    fi
+
+    echo ""
+    echo -e "${BLUE}=== 诊断建议 ===${NC}"
+
+    # 基于诊断结果提供建议
+    if [[ -z "$rtc_pods" ]]; then
+        echo -e "${YELLOW}建议1: Matrix RTC服务未部署，请检查ESS部署配置${NC}"
+        echo "  - 确认ESS Helm chart包含Matrix RTC组件"
+        echo "  - 检查部署日志: kubectl logs -n ess deployment/ess-matrix-rtc-sfu"
+    fi
+
+    if ! echo "$well_known_client" | grep -q "org.matrix.msc4143.rtc_foci"; then
+        echo -e "${YELLOW}建议2: 修复well-known配置中的rtc_foci${NC}"
+        echo "  - 运行菜单选项12: 修复well-known配置"
+    fi
+
+    echo -e "${YELLOW}建议3: 检查网络端口配置${NC}"
+    echo "  - WebRTC TCP端口: 30881"
+    echo "  - WebRTC UDP端口: 30882"
+    echo "  - 确保防火墙开放这些端口"
+
+    echo ""
+    read -p "按任意键返回主菜单..." || true
 }
 
 # 修复Element Web ConfigMap中的端口问题

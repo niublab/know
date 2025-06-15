@@ -1094,4 +1094,84 @@ kubectl describe certificate <cert-name> -n ess
 
 这个流程确保ESS部署时域名配置的完整性和正确性。
 
+📞 Element Call错误分析和解决方案
+----------------------------------------
+
+错误信息：MISSING_MATRIX_RTC_FOCUS
+域名：niub.win
+问题：Element Call功能不可用
+
+🔍 问题根本原因分析：
+
+基于官方文档和实际错误信息，MISSING_MATRIX_RTC_FOCUS错误的根本原因是：
+
+1️⃣ Matrix RTC Focus服务配置问题：
+- well-known配置中的org.matrix.msc4143.rtc_foci配置缺失或错误
+- LiveKit服务URL配置不正确
+- Matrix RTC服务未正确部署或不可访问
+
+2️⃣ ESS部署可能缺少的组件：
+- matrix-rtc-sfu (SFU服务)
+- matrix-rtc-authorisation-service (授权服务)
+- LiveKit配置和集成
+
+3️⃣ 网络配置问题：
+- WebRTC端口未正确配置
+- 防火墙阻止WebRTC流量
+- NAT/STUN配置问题
+
+🛠️ 解决方案：
+
+1️⃣ 检查Matrix RTC服务状态：
+```bash
+kubectl get pods -n ess | grep matrix-rtc
+kubectl get svc -n ess | grep matrix-rtc
+kubectl get ingress -n ess | grep matrix-rtc
+```
+
+2️⃣ 验证well-known配置：
+```bash
+kubectl get configmap ess-well-known-haproxy -n ess -o jsonpath='{.data.client}' | jq .
+```
+
+正确的rtc_foci配置应该包含：
+```json
+{
+  "org.matrix.msc4143.rtc_foci": [
+    {
+      "type": "livekit",
+      "livekit_service_url": "https://rtc.domain.com:port"
+    }
+  ]
+}
+```
+
+3️⃣ 检查ESS Helm部署配置：
+确保ESS部署包含Matrix RTC组件：
+- matrixRTC.enabled: true
+- 正确的域名配置
+- 端口配置
+
+4️⃣ 网络端口配置：
+- WebRTC TCP端口: 30881
+- WebRTC UDP端口: 30882
+- HTTPS端口用于信令
+
+🔧 修复步骤：
+
+1. 运行诊断功能：菜单选项10
+2. 检查Matrix RTC服务部署状态
+3. 修复well-known配置中的rtc_foci
+4. 验证网络端口配置
+5. 重启相关服务
+
+📋 预防措施：
+
+1. 部署ESS时确保包含完整的Matrix RTC配置
+2. 验证所有域名解析正确
+3. 确保防火墙规则包含WebRTC端口
+4. 定期检查服务健康状态
+
+这个问题的解决需要确保ESS的Matrix RTC组件完整部署和正确配置。
+
 ==============================================
