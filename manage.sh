@@ -1019,18 +1019,26 @@ configure_firewall() {
         $SUDO_CMD ufw allow "$EXTERNAL_HTTP_PORT/tcp" comment "ESS HTTP"
         $SUDO_CMD ufw allow "$EXTERNAL_HTTPS_PORT/tcp" comment "ESS HTTPS"
 
-        log_success "UFW防火墙规则已添加"
+        # 开放WebRTC端口（关键修复）
+        $SUDO_CMD ufw allow "30881/tcp" comment "WebRTC TCP"
+        $SUDO_CMD ufw allow "30882/udp" comment "WebRTC UDP"
+
+        log_success "UFW防火墙规则已添加（包括WebRTC端口）"
     elif command -v firewall-cmd >/dev/null 2>&1; then
         log_info "检测到firewalld防火墙"
 
         # 开放自定义端口
         $SUDO_CMD firewall-cmd --permanent --add-port="$EXTERNAL_HTTP_PORT/tcp"
         $SUDO_CMD firewall-cmd --permanent --add-port="$EXTERNAL_HTTPS_PORT/tcp"
+
+        # 开放WebRTC端口（关键修复）
+        $SUDO_CMD firewall-cmd --permanent --add-port="30881/tcp"
+        $SUDO_CMD firewall-cmd --permanent --add-port="30882/udp"
         $SUDO_CMD firewall-cmd --reload
 
-        log_success "firewalld防火墙规则已添加"
+        log_success "firewalld防火墙规则已添加（包括WebRTC端口）"
     else
-        log_warning "未检测到支持的防火墙，请手动开放端口: $EXTERNAL_HTTP_PORT, $EXTERNAL_HTTPS_PORT"
+        log_warning "未检测到支持的防火墙，请手动开放端口: $EXTERNAL_HTTP_PORT, $EXTERNAL_HTTPS_PORT, 30881/tcp, 30882/udp"
     fi
 }
 
@@ -1271,7 +1279,66 @@ fix_ess_wellknown_configmap() {
     log_info "备份文件: $backup_file"
 }
 
+# 修复WebRTC端口问题
+fix_webrtc_ports() {
+    log_info "修复WebRTC端口问题..."
 
+    # 检查当前端口状态
+    local tcp_listening=$(netstat -tlnp 2>/dev/null | grep ":30881" && echo "是" || echo "否")
+    local udp_listening=$(netstat -ulnp 2>/dev/null | grep ":30882" && echo "是" || echo "否")
+
+    echo "当前WebRTC端口状态："
+    echo "TCP 30881监听: $tcp_listening"
+    echo "UDP 30882监听: $udp_listening"
+
+    if [[ "$tcp_listening" == "是" && "$udp_listening" == "是" ]]; then
+        log_success "WebRTC端口已正常监听"
+        return 0
+    fi
+
+    log_warning "WebRTC端口未正确监听，开始修复..."
+
+    # 检查Matrix RTC服务状态
+    log_info "检查Matrix RTC服务状态..."
+    kubectl get pods -n ess | grep matrix-rtc
+    kubectl get svc -n ess | grep matrix-rtc
+
+    # 重启Matrix RTC服务
+    log_info "重启Matrix RTC服务..."
+    kubectl rollout restart deployment ess-matrix-rtc-sfu -n ess
+    kubectl rollout restart deployment ess-matrix-rtc-authorisation-service -n ess
+
+    # 等待重启完成
+    log_info "等待服务重启完成..."
+    kubectl rollout status deployment ess-matrix-rtc-sfu -n ess --timeout=300s
+    kubectl rollout status deployment ess-matrix-rtc-authorisation-service -n ess --timeout=300s
+
+    # 等待端口启动
+    sleep 15
+
+    # 再次检查端口
+    local tcp_listening_after=$(netstat -tlnp 2>/dev/null | grep ":30881" && echo "是" || echo "否")
+    local udp_listening_after=$(netstat -ulnp 2>/dev/null | grep ":30882" && echo "是" || echo "否")
+
+    echo ""
+    echo "修复后WebRTC端口状态："
+    echo "TCP 30881监听: $tcp_listening_after"
+    echo "UDP 30882监听: $udp_listening_after"
+
+    if [[ "$tcp_listening_after" == "是" && "$udp_listening_after" == "是" ]]; then
+        log_success "WebRTC端口修复成功"
+        return 0
+    else
+        log_error "WebRTC端口修复失败"
+        echo ""
+        echo "可能的原因："
+        echo "1. ESS部署配置问题"
+        echo "2. NodePort服务配置错误"
+        echo "3. 防火墙阻止端口"
+        echo "4. 资源不足导致服务启动失败"
+        return 1
+    fi
+}
 
 # 诊断和修复Matrix RTC Focus配置
 diagnose_matrix_rtc_focus() {
@@ -1399,10 +1466,32 @@ diagnose_matrix_rtc_focus() {
         fi
     fi
 
-    echo -e "${YELLOW}建议3: 检查网络端口配置${NC}"
-    echo "  - WebRTC TCP端口: 30881"
-    echo "  - WebRTC UDP端口: 30882"
-    echo "  - 确保防火墙开放这些端口"
+    # 检查WebRTC端口状态并提供修复建议
+    local tcp_listening=$(netstat -tlnp 2>/dev/null | grep ":30881" && echo "是" || echo "否")
+    local udp_listening=$(netstat -ulnp 2>/dev/null | grep ":30882" && echo "是" || echo "否")
+
+    echo -e "${YELLOW}建议3: 检查WebRTC端口配置${NC}"
+    echo "  - WebRTC TCP 30881监听状态: $tcp_listening"
+    echo "  - WebRTC UDP 30882监听状态: $udp_listening"
+
+    if [[ "$tcp_listening" == "否" || "$udp_listening" == "否" ]]; then
+        echo -e "${RED}❌ WebRTC端口未正确监听，这是Element Call问题的主要原因${NC}"
+        echo ""
+        echo -e "${BLUE}立即修复WebRTC端口问题：${NC}"
+        read -p "是否立即修复WebRTC端口问题? [y/N]: " fix_webrtc
+        if [[ "$fix_webrtc" =~ ^[Yy]$ ]]; then
+            echo ""
+            fix_webrtc_ports
+        else
+            echo "  - 手动修复: 重启Matrix RTC服务"
+            echo "    kubectl rollout restart deployment ess-matrix-rtc-sfu -n ess"
+            echo "    kubectl rollout restart deployment ess-matrix-rtc-authorisation-service -n ess"
+        fi
+    else
+        echo -e "${GREEN}✅ WebRTC端口监听正常${NC}"
+    fi
+
+    echo "  - 确保防火墙开放这些端口: ufw allow 30881/tcp && ufw allow 30882/udp"
 
     # 基于实际诊断结果的具体建议
     if [[ -n "$rtc_pods" && -n "$rtc_svc" && -n "$rtc_ingress" ]]; then
@@ -1411,18 +1500,29 @@ diagnose_matrix_rtc_focus() {
             echo -e "${GREEN}=== Element Call状态总结 ===${NC}"
             echo -e "${GREEN}✅ Matrix RTC服务运行正常${NC}"
             echo -e "${GREEN}✅ well-known配置包含rtc_foci${NC}"
-            echo ""
-            echo -e "${BLUE}如果Element Call仍然不工作，可能的原因：${NC}"
-            echo "1. 浏览器缓存问题 - 清除浏览器缓存并刷新"
-            echo "2. 网络防火墙阻止WebRTC流量"
-            echo "3. NAT/STUN配置问题"
-            echo "4. 客户端版本兼容性问题"
-            echo ""
-            echo -e "${YELLOW}建议测试步骤：${NC}"
-            echo "1. 访问 https://$ELEMENT_WEB_HOST:$EXTERNAL_HTTPS_PORT"
-            echo "2. 创建或加入一个房间"
-            echo "3. 尝试发起视频通话"
-            echo "4. 检查浏览器开发者工具的网络和控制台错误"
+
+            if [[ "$tcp_listening" == "是" && "$udp_listening" == "是" ]]; then
+                echo -e "${GREEN}✅ WebRTC端口监听正常${NC}"
+                echo ""
+                echo -e "${BLUE}如果Element Call仍然不工作，可能的原因：${NC}"
+                echo "1. 🔄 浏览器缓存问题 - 清除浏览器缓存并刷新"
+                echo "2. 🌐 网络防火墙阻止WebRTC流量"
+                echo "3. 🔧 NAT/STUN配置问题"
+                echo "4. 📱 客户端版本兼容性问题"
+                echo ""
+                echo -e "${YELLOW}建议测试步骤：${NC}"
+                echo "1. 清除浏览器缓存和Cookie"
+                echo "2. 使用无痕模式访问: https://$ELEMENT_WEB_HOST:$EXTERNAL_HTTPS_PORT"
+                echo "3. 创建或加入一个房间"
+                echo "4. 尝试发起视频通话"
+                echo "5. 检查浏览器开发者工具的网络和控制台错误"
+                echo ""
+                echo -e "${GREEN}您的Matrix RTC配置是正确的！问题很可能是客户端相关。${NC}"
+            else
+                echo -e "${RED}❌ WebRTC端口问题需要修复${NC}"
+                echo ""
+                echo -e "${YELLOW}这是Element Call无法工作的主要原因！${NC}"
+            fi
         fi
     fi
 
@@ -1970,6 +2070,46 @@ full_setup() {
             echo "这可能是ESS部署配置问题，请检查ESS Helm配置"
         fi
 
+        # 检查WebRTC端口状态（关键修复）
+        log_info "检查WebRTC端口状态..."
+        local tcp_listening=$(netstat -tlnp 2>/dev/null | grep ":30881" && echo "是" || echo "否")
+        local udp_listening=$(netstat -ulnp 2>/dev/null | grep ":30882" && echo "是" || echo "否")
+
+        echo "WebRTC TCP 30881监听: $tcp_listening"
+        echo "WebRTC UDP 30882监听: $udp_listening"
+
+        if [[ "$tcp_listening" == "否" || "$udp_listening" == "否" ]]; then
+            log_warning "WebRTC端口未正确监听，这是Element Call问题的主要原因"
+            echo "正在检查Matrix RTC服务配置..."
+
+            # 检查Matrix RTC服务的NodePort配置
+            kubectl get svc -n ess | grep matrix-rtc
+
+            log_info "尝试重启Matrix RTC服务以修复端口问题..."
+            kubectl rollout restart deployment ess-matrix-rtc-sfu -n ess
+            kubectl rollout restart deployment ess-matrix-rtc-authorisation-service -n ess
+
+            # 等待重启完成
+            kubectl rollout status deployment ess-matrix-rtc-sfu -n ess --timeout=300s
+            kubectl rollout status deployment ess-matrix-rtc-authorisation-service -n ess --timeout=300s
+
+            # 再次检查端口
+            sleep 10
+            local tcp_listening_after=$(netstat -tlnp 2>/dev/null | grep ":30881" && echo "是" || echo "否")
+            local udp_listening_after=$(netstat -ulnp 2>/dev/null | grep ":30882" && echo "是" || echo "否")
+
+            echo "重启后WebRTC TCP 30881监听: $tcp_listening_after"
+            echo "重启后WebRTC UDP 30882监听: $udp_listening_after"
+
+            if [[ "$tcp_listening_after" == "是" && "$udp_listening_after" == "是" ]]; then
+                log_success "WebRTC端口问题已修复"
+            else
+                log_warning "WebRTC端口仍有问题，可能需要检查ESS部署配置"
+            fi
+        else
+            log_success "WebRTC端口监听正常"
+        fi
+
         # 检查well-known RTC配置
         log_info "验证well-known RTC配置..."
         local well_known_client=$(kubectl get configmap ess-well-known-haproxy -n ess -o jsonpath='{.data.client}' 2>/dev/null || echo "")
@@ -1984,6 +2124,25 @@ full_setup() {
         else
             log_warning "well-known配置中缺少rtc_foci，Element Call将无法使用"
             echo "建议运行菜单选项10进行详细诊断"
+        fi
+
+        # 测试app.niub.win的well-known配置（关键修复）
+        log_info "测试app.niub.win的well-known配置..."
+        local app_wellknown_status=$(curl -k -s -o /dev/null -w "%{http_code}" "https://app.niub.win:$EXTERNAL_HTTPS_PORT/.well-known/matrix/client" 2>/dev/null || echo "000")
+        if [[ "$app_wellknown_status" == "200" ]]; then
+            log_success "app.niub.win的well-known配置可访问"
+        else
+            log_warning "app.niub.win的well-known配置返回HTTP $app_wellknown_status"
+            log_info "这可能是Element Call问题的原因之一"
+
+            # 重启nginx以修复配置
+            log_info "重启nginx以修复app.niub.win配置..."
+            $SUDO_CMD systemctl reload nginx
+
+            # 再次测试
+            sleep 5
+            local app_wellknown_status_after=$(curl -k -s -o /dev/null -w "%{http_code}" "https://app.niub.win:$EXTERNAL_HTTPS_PORT/.well-known/matrix/client" 2>/dev/null || echo "000")
+            echo "重启nginx后app.niub.win well-known状态: HTTP $app_wellknown_status_after"
         fi
 
         # 第五阶段：配置验证和总结
