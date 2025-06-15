@@ -802,10 +802,41 @@ fix_element_call_issues() {
         kubectl rollout status deployment ess-matrix-rtc-sfu -n ess --timeout=300s
         kubectl rollout status deployment ess-matrix-rtc-authorisation-service -n ess --timeout=300s
 
+        # 深度诊断WebRTC端口问题
+        log_info "深度诊断WebRTC端口问题..."
+
+        # 检查NodePort服务配置
+        echo "检查NodePort服务配置："
+        kubectl get svc -n ess | grep matrix-rtc
+
+        # 检查服务端点
+        echo ""
+        echo "检查服务端点："
+        kubectl get endpoints -n ess | grep matrix-rtc
+
+        # 检查iptables规则
+        echo ""
+        echo "检查iptables NAT规则："
+        $SUDO_CMD iptables -t nat -L | grep -E "30881|30882" || echo "未找到WebRTC端口的iptables规则"
+
+        # 检查Pod网络状态
+        echo ""
+        echo "检查Matrix RTC Pod网络状态："
+        kubectl exec -n ess deployment/ess-matrix-rtc-sfu -- netstat -tlnp 2>/dev/null | grep -E "7880|30881" || echo "Pod内部端口检查失败"
+
         # 重启网络组件
         log_info "重启Kubernetes网络组件..."
         $SUDO_CMD systemctl restart kube-proxy 2>/dev/null || true
         $SUDO_CMD systemctl restart kubelet 2>/dev/null || true
+
+        # 强制重新创建NodePort服务
+        log_info "尝试重新创建NodePort服务..."
+        kubectl delete svc ess-matrix-rtc-sfu-tcp ess-matrix-rtc-sfu-muxed-udp -n ess 2>/dev/null || true
+        sleep 10
+
+        # 重启Matrix RTC部署以重新创建服务
+        kubectl rollout restart deployment ess-matrix-rtc-sfu -n ess
+        kubectl rollout status deployment ess-matrix-rtc-sfu -n ess --timeout=300s
 
         # 等待端口启动
         sleep 30
@@ -828,6 +859,189 @@ fix_element_call_issues() {
     fi
 
     log_success "Element Call问题修复完成"
+}
+
+# 专门的WebRTC端口修复函数
+fix_webrtc_ports_advanced() {
+    log_info "高级WebRTC端口修复..."
+
+    echo ""
+    echo -e "${BLUE}=== WebRTC端口问题深度分析 ===${NC}"
+
+    # 1. 检查ESS Helm配置
+    log_info "1. 检查ESS Helm配置中的Matrix RTC设置..."
+    if helm get values ess -n ess | grep -A 20 "matrix-rtc" 2>/dev/null; then
+        echo "找到Matrix RTC配置"
+    else
+        log_error "ESS Helm配置中可能缺少Matrix RTC配置"
+        echo ""
+        echo "可能的解决方案："
+        echo "1. 重新部署ESS并确保启用Matrix RTC功能"
+        echo "2. 检查ESS版本是否支持Matrix RTC"
+        return 1
+    fi
+
+    echo ""
+
+    # 2. 检查NodePort服务的详细配置
+    log_info "2. 检查NodePort服务详细配置..."
+
+    local tcp_svc=$(kubectl get svc ess-matrix-rtc-sfu-tcp -n ess -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null || echo "")
+    local udp_svc=$(kubectl get svc ess-matrix-rtc-sfu-muxed-udp -n ess -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null || echo "")
+
+    echo "TCP NodePort配置: $tcp_svc"
+    echo "UDP NodePort配置: $udp_svc"
+
+    if [[ "$tcp_svc" != "30881" || "$udp_svc" != "30882" ]]; then
+        log_error "NodePort端口配置不正确"
+        echo "期望: TCP=30881, UDP=30882"
+        echo "实际: TCP=$tcp_svc, UDP=$udp_svc"
+
+        log_info "尝试修复NodePort配置..."
+
+        # 删除现有服务
+        kubectl delete svc ess-matrix-rtc-sfu-tcp ess-matrix-rtc-sfu-muxed-udp -n ess 2>/dev/null || true
+
+        # 创建正确的NodePort服务
+        cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: ess-matrix-rtc-sfu-tcp
+  namespace: ess
+spec:
+  type: NodePort
+  ports:
+  - port: 30881
+    targetPort: 30881
+    nodePort: 30881
+    protocol: TCP
+  selector:
+    app.kubernetes.io/name: matrix-rtc-sfu
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ess-matrix-rtc-sfu-muxed-udp
+  namespace: ess
+spec:
+  type: NodePort
+  ports:
+  - port: 30882
+    targetPort: 30882
+    nodePort: 30882
+    protocol: UDP
+  selector:
+    app.kubernetes.io/name: matrix-rtc-sfu
+EOF
+
+        if [[ $? -eq 0 ]]; then
+            log_success "NodePort服务重新创建成功"
+        else
+            log_error "NodePort服务创建失败"
+            return 1
+        fi
+    fi
+
+    echo ""
+
+    # 3. 检查Pod内部端口配置
+    log_info "3. 检查Matrix RTC Pod内部配置..."
+
+    local pod_name=$(kubectl get pods -n ess -l app.kubernetes.io/name=matrix-rtc-sfu -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+    if [[ -n "$pod_name" ]]; then
+        echo "Matrix RTC SFU Pod: $pod_name"
+
+        # 检查Pod内部所有端口监听
+        echo ""
+        echo "Pod内部端口监听情况："
+        kubectl exec -n ess "$pod_name" -- netstat -tlnp 2>/dev/null || echo "netstat命令失败"
+        kubectl exec -n ess "$pod_name" -- netstat -ulnp 2>/dev/null || echo "UDP netstat命令失败"
+
+        echo ""
+        echo "Pod内部进程信息："
+        kubectl exec -n ess "$pod_name" -- ps aux 2>/dev/null || echo "ps命令失败"
+
+        # 检查LiveKit配置文件
+        echo ""
+        echo "LiveKit配置文件内容："
+        kubectl exec -n ess "$pod_name" -- cat /conf/config.yaml 2>/dev/null || echo "无法读取配置文件"
+
+        # 检查Pod日志
+        echo ""
+        echo "Pod启动日志（最近30行）："
+        kubectl logs -n ess "$pod_name" --tail=30
+
+        # 检查Pod的端口配置
+        echo ""
+        echo "Pod端口配置："
+        kubectl get pod -n ess "$pod_name" -o jsonpath='{.spec.containers[0].ports}' | jq . 2>/dev/null || echo "无法获取端口配置"
+
+    else
+        log_error "未找到Matrix RTC SFU Pod"
+        return 1
+    fi
+
+    echo ""
+
+    # 4. 强制重启所有相关组件
+    log_info "4. 强制重启所有相关组件..."
+
+    # 重启kube-proxy
+    $SUDO_CMD systemctl restart kube-proxy 2>/dev/null || true
+
+    # 重启kubelet
+    $SUDO_CMD systemctl restart kubelet 2>/dev/null || true
+
+    # 等待网络组件重启
+    sleep 20
+
+    # 重启Matrix RTC服务
+    kubectl rollout restart deployment ess-matrix-rtc-sfu -n ess
+    kubectl rollout restart deployment ess-matrix-rtc-authorisation-service -n ess
+
+    # 等待重启完成
+    kubectl rollout status deployment ess-matrix-rtc-sfu -n ess --timeout=300s
+    kubectl rollout status deployment ess-matrix-rtc-authorisation-service -n ess --timeout=300s
+
+    # 等待端口启动
+    sleep 30
+
+    echo ""
+
+    # 5. 最终验证
+    log_info "5. 最终验证..."
+
+    local final_tcp=$(netstat -tlnp 2>/dev/null | grep ":30881" && echo "监听中" || echo "未监听")
+    local final_udp=$(netstat -ulnp 2>/dev/null | grep ":30882" && echo "监听中" || echo "未监听")
+
+    echo "最终WebRTC端口状态："
+    echo "TCP 30881: $final_tcp"
+    echo "UDP 30882: $final_udp"
+
+    if [[ "$final_tcp" == "监听中" && "$final_udp" == "监听中" ]]; then
+        log_success "WebRTC端口修复成功！"
+        return 0
+    else
+        log_error "WebRTC端口修复失败"
+        echo ""
+        echo "基于诊断结果的建议："
+        echo ""
+        echo "从您的配置来看，问题可能是："
+        echo "1. LiveKit服务器配置问题 - 可能没有正确绑定到30881/30882端口"
+        echo "2. Pod内部端口映射问题"
+        echo "3. LiveKit服务启动失败"
+        echo ""
+        echo "建议的解决步骤："
+        echo "1. 检查LiveKit配置文件中的端口设置"
+        echo "2. 重新配置ESS的Matrix RTC组件"
+        echo "3. 如果问题持续，可能需要重新部署ESS"
+        echo ""
+        echo "立即可尝试的操作："
+        echo "• 运行: kubectl logs -n ess \$(kubectl get pods -n ess -l app.kubernetes.io/name=matrix-rtc-sfu -o name) -f"
+        echo "• 检查LiveKit配置: kubectl exec -n ess \$(kubectl get pods -n ess -l app.kubernetes.io/name=matrix-rtc-sfu -o name | cut -d/ -f2) -- cat /conf/config.yaml"
+        return 1
+    fi
 }
 
 # 验证配置
@@ -1112,6 +1326,23 @@ fix_element_call() {
 
     # 执行修复
     fix_element_call_issues
+
+    # 检查修复结果
+    local tcp_result=$(netstat -tlnp 2>/dev/null | grep ":30881" && echo "监听中" || echo "未监听")
+    local udp_result=$(netstat -ulnp 2>/dev/null | grep ":30882" && echo "监听中" || echo "未监听")
+
+    if [[ "$tcp_result" == "未监听" || "$udp_result" == "未监听" ]]; then
+        echo ""
+        log_warning "基础修复未能解决WebRTC端口问题"
+        echo ""
+        read -p "是否尝试高级修复? [y/N]: " advanced_fix || advanced_fix=""
+
+        if [[ "$advanced_fix" =~ ^[Yy]$ ]]; then
+            echo ""
+            log_info "开始高级WebRTC端口修复..."
+            fix_webrtc_ports_advanced
+        fi
+    fi
 
     echo ""
     log_success "Element Call修复完成！"
