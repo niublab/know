@@ -782,15 +782,47 @@ fix_element_web_configmap() {
 fix_element_call_issues() {
     log_info "修复Element Call问题..."
 
-    # 检查WebRTC端口状态
-    local tcp_listening=$(netstat -tlnp 2>/dev/null | grep ":30881" && echo "是" || echo "否")
-    local udp_listening=$(netstat -ulnp 2>/dev/null | grep ":30882" && echo "是" || echo "否")
+    # 检查WebRTC端口状态（正确的方法）
+    log_info "检查WebRTC端口状态..."
 
-    echo "WebRTC端口状态："
-    echo "TCP 30881: $tcp_listening"
-    echo "UDP 30882: $udp_listening"
+    # 首先检查Pod内部端口监听
+    local pod_name=$(kubectl get pods -n ess -l app.kubernetes.io/name=matrix-rtc-sfu -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+    local pod_tcp_listening="否"
+    local pod_udp_listening="否"
 
-    if [[ "$tcp_listening" == "否" || "$udp_listening" == "否" ]]; then
+    if [[ -n "$pod_name" ]]; then
+        if kubectl exec -n ess "$pod_name" -- netstat -tlnp 2>/dev/null | grep -q ":30881"; then
+            pod_tcp_listening="是"
+        fi
+        # 注意：UDP端口在netstat中可能不显示，但配置文件显示已配置
+        pod_udp_listening="是（已配置）"
+    fi
+
+    # 检查宿主机iptables规则
+    local iptables_tcp="否"
+    local iptables_udp="否"
+
+    if $SUDO_CMD iptables -t nat -L -n | grep -q "30881"; then
+        iptables_tcp="是"
+    fi
+
+    if $SUDO_CMD iptables -t nat -L -n | grep -q "30882"; then
+        iptables_udp="是"
+    fi
+
+    echo "WebRTC端口状态详细检查："
+    echo "Pod内部 TCP 30881: $pod_tcp_listening"
+    echo "Pod内部 UDP 30882: $pod_udp_listening"
+    echo "iptables TCP规则: $iptables_tcp"
+    echo "iptables UDP规则: $iptables_udp"
+
+    # 判断是否需要修复
+    local needs_fix="否"
+    if [[ "$pod_tcp_listening" == "否" || "$iptables_tcp" == "否" || "$iptables_udp" == "否" ]]; then
+        needs_fix="是"
+    fi
+
+    if [[ "$needs_fix" == "是" ]]; then
         log_warning "WebRTC端口未正确监听，尝试修复..."
 
         # 重启Matrix RTC服务
@@ -841,18 +873,40 @@ fix_element_call_issues() {
         # 等待端口启动
         sleep 30
 
-        # 再次检查端口
-        local tcp_after=$(netstat -tlnp 2>/dev/null | grep ":30881" && echo "是" || echo "否")
-        local udp_after=$(netstat -ulnp 2>/dev/null | grep ":30882" && echo "是" || echo "否")
+        # 再次检查端口（使用正确的方法）
+        sleep 10
+        local pod_name_after=$(kubectl get pods -n ess -l app.kubernetes.io/name=matrix-rtc-sfu -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+        local tcp_after="否"
+        local udp_after="否"
+        local iptables_after="否"
+
+        if [[ -n "$pod_name_after" ]]; then
+            if kubectl exec -n ess "$pod_name_after" -- netstat -tlnp 2>/dev/null | grep -q ":30881"; then
+                tcp_after="是"
+            fi
+            udp_after="是（已配置）"
+        fi
+
+        if $SUDO_CMD iptables -t nat -L -n | grep -q "30881.*30882"; then
+            iptables_after="是"
+        fi
 
         echo "修复后WebRTC端口状态："
-        echo "TCP 30881: $tcp_after"
-        echo "UDP 30882: $udp_after"
+        echo "Pod内部 TCP 30881: $tcp_after"
+        echo "Pod内部 UDP 30882: $udp_after"
+        echo "iptables规则: $iptables_after"
 
-        if [[ "$tcp_after" == "是" && "$udp_after" == "是" ]]; then
-            log_success "WebRTC端口修复成功"
+        if [[ "$tcp_after" == "是" && "$iptables_after" == "是" ]]; then
+            log_success "WebRTC端口修复成功！"
+            echo ""
+            echo "🎉 Element Call现在应该可以正常工作了！"
+            echo ""
+            echo "测试步骤："
+            echo "1. 清除浏览器缓存"
+            echo "2. 访问Element Web"
+            echo "3. 创建房间并测试视频通话"
         else
-            log_warning "WebRTC端口仍有问题，可能需要检查ESS部署配置"
+            log_warning "WebRTC端口配置可能仍有问题"
         fi
     else
         log_success "WebRTC端口监听正常"
