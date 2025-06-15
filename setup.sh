@@ -1,9 +1,11 @@
 #!/bin/bash
 
-# ESS Community 自动部署脚本 - 第一步：基于官方最新规范的基础部署
-# 版本: 1.0.0
+# ESS Community 自动部署脚本
+# 版本: 3.0.0 - 与完整管理系统集成版本
 # 基于: Element Server Suite Community Edition 25.6.1
 # 许可证: AGPL-3.0 (仅限非商业用途)
+#
+# 此脚本负责ESS的初始部署，部署完成后请使用manage.sh进行后续管理
 
 set -euo pipefail
 
@@ -15,7 +17,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # 全局变量
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="3.0.0"
 ESS_VERSION="25.6.1"
 NAMESPACE="ess"
 SUDO_CMD="sudo"  # 将在check_system_requirements中根据用户类型设置
@@ -571,15 +573,23 @@ verify_deployment() {
 
         echo ""
         echo -e "${GREEN}================================${NC}"
-        echo -e "${GREEN}部署验证完成${NC}"
+        echo -e "${GREEN}ESS基础部署验证完成${NC}"
         echo -e "${GREEN}================================${NC}"
         echo "Web 客户端访问地址: https://$web_host"
         echo "Matrix 服务器名: $server_name"
         echo ""
-        echo "建议验证步骤:"
+        echo -e "${BLUE}基础验证步骤:${NC}"
         echo "1. 访问 Web 客户端并登录"
         echo "2. 使用 Matrix Federation Tester 验证联邦功能"
         echo "3. 使用 Element X 移动客户端测试"
+        echo ""
+        echo -e "${YELLOW}如果遇到问题：${NC}"
+        echo "• 外网无法访问 → 可能需要nginx反代（ISP端口封锁）"
+        echo "• Element Call无法使用 → 需要修复WebRTC配置"
+        echo "• 需要管理用户 → 使用完整管理系统"
+        echo ""
+        echo -e "${GREEN}完整解决方案：${NC}"
+        echo "curl -fsSL https://raw.githubusercontent.com/niublab/know/main/manage.sh | bash"
         echo -e "${GREEN}================================${NC}"
     fi
 
@@ -596,6 +606,11 @@ show_main_menu() {
     echo -e "${BLUE}版本: $SCRIPT_VERSION${NC}"
     echo -e "${BLUE}ESS版本: $ESS_VERSION${NC}"
     echo -e "${BLUE}================================${NC}"
+    echo ""
+    echo -e "${YELLOW}说明：${NC}"
+    echo "• 此脚本负责ESS的基础部署"
+    echo "• 部署完成后建议使用manage.sh进行完整配置"
+    echo "• manage.sh提供nginx反代、Element Call修复等功能"
     echo ""
     echo "请选择操作:"
     echo "1) 完整安装 (推荐)"
@@ -712,12 +727,29 @@ full_install() {
     deploy_ess
 
     echo ""
-    echo -e "${GREEN}🎉 ESS Community 完整安装完成！${NC}"
+    echo -e "${GREEN}🎉 ESS Community 基础部署完成！${NC}"
     echo ""
-    echo -e "${BLUE}下一步操作：${NC}"
+    echo -e "${BLUE}重要提示：${NC}"
+    echo "ESS基础部署已完成，但您可能还需要进行以下配置："
+    echo ""
+    echo -e "${YELLOW}立即推荐操作：${NC}"
     echo "1. 使用选项 6 创建初始用户"
     echo "2. 使用选项 7 验证部署状态"
-    echo "3. 访问您配置的域名测试功能"
+    echo ""
+    echo -e "${YELLOW}后续配置（解决常见问题）：${NC}"
+    echo "• 如果ISP封锁了80/443端口，需要配置nginx反代"
+    echo "• 如果Element Call无法使用，需要修复WebRTC配置"
+    echo "• 如果需要管理用户，可以使用用户管理功能"
+    echo ""
+    echo -e "${GREEN}完整管理工具：${NC}"
+    echo "部署完成后，建议使用ESS完整管理系统："
+    echo "curl -fsSL https://raw.githubusercontent.com/niublab/know/main/manage.sh | bash"
+    echo ""
+    echo "管理系统提供："
+    echo "• 一键nginx反代配置（解决端口封锁）"
+    echo "• Element Call问题修复"
+    echo "• 用户管理功能"
+    echo "• 完整系统诊断"
     echo ""
 
     read -p "按任意键返回主菜单..."
