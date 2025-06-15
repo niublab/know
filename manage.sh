@@ -915,6 +915,94 @@ fix_element_call_issues() {
     log_success "Element Call问题修复完成"
 }
 
+# 获取正确的外部IP（使用指定的方法）
+get_correct_external_ip() {
+    local external_ip=""
+
+    log_info "使用正确的方法获取外部IP..."
+
+    # 方法1：使用dig查询自定义域名
+    if [[ -n "$SERVER_NAME" ]]; then
+        log_info "尝试通过dig查询域名 $SERVER_NAME..."
+
+        # 使用Google DNS
+        external_ip=$(dig +short "$SERVER_NAME" @8.8.8.8 2>/dev/null | head -1)
+        if [[ -n "$external_ip" && "$external_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            log_success "通过Google DNS获取到外部IP: $external_ip"
+            echo "$external_ip"
+            return 0
+        fi
+
+        # 使用Cloudflare DNS
+        external_ip=$(dig +short "$SERVER_NAME" @1.1.1.1 2>/dev/null | head -1)
+        if [[ -n "$external_ip" && "$external_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            log_success "通过Cloudflare DNS获取到外部IP: $external_ip"
+            echo "$external_ip"
+            return 0
+        fi
+    fi
+
+    log_error "无法通过dig方法获取外部IP"
+    return 1
+}
+
+# 修复LiveKit外部IP配置
+fix_livekit_external_ip() {
+    log_info "修复LiveKit外部IP配置..."
+
+    # 获取正确的外部IP
+    local correct_ip=$(get_correct_external_ip)
+    if [[ -z "$correct_ip" ]]; then
+        log_error "无法获取正确的外部IP，跳过LiveKit配置修复"
+        return 1
+    fi
+
+    log_info "将配置LiveKit使用外部IP: $correct_ip"
+
+    # 获取当前的Matrix RTC ConfigMap
+    local configmap_name="ess-matrix-rtc-sfu"
+
+    # 备份当前配置
+    local backup_file="/tmp/matrix-rtc-configmap-backup-$(date +%Y%m%d-%H%M%S).yaml"
+    kubectl get configmap "$configmap_name" -n ess -o yaml > "$backup_file" 2>/dev/null
+    log_info "ConfigMap备份到: $backup_file"
+
+    # 创建新的配置，明确指定外部IP
+    local new_config="rtc:
+  use_external_ip: true
+  external_ip: $correct_ip
+  tcp_port: 30881
+  udp_port: 30882
+port: 7880
+prometheus_port: 6789
+logging:
+  level: info
+  json: false
+  pion_level: error
+turn:
+  enabled: false"
+
+    # 更新ConfigMap
+    if kubectl patch configmap "$configmap_name" -n ess --type merge -p "{\"data\":{\"config-underrides.yaml\":\"$new_config\"}}"; then
+        log_success "LiveKit ConfigMap更新成功"
+
+        # 重启Matrix RTC服务以应用新配置
+        log_info "重启Matrix RTC服务以应用新配置..."
+        kubectl rollout restart deployment ess-matrix-rtc-sfu -n ess
+        kubectl rollout restart deployment ess-matrix-rtc-authorisation-service -n ess
+
+        # 等待重启完成
+        kubectl rollout status deployment ess-matrix-rtc-sfu -n ess --timeout=300s
+        kubectl rollout status deployment ess-matrix-rtc-authorisation-service -n ess --timeout=300s
+
+        log_success "LiveKit外部IP配置修复完成"
+        return 0
+    else
+        log_error "LiveKit ConfigMap更新失败"
+        return 1
+    fi
+}
+
 # 专门的WebRTC端口修复函数
 fix_webrtc_ports_advanced() {
     log_info "高级WebRTC端口修复..."
@@ -1019,7 +1107,31 @@ EOF
         # 检查LiveKit配置文件
         echo ""
         echo "LiveKit配置文件内容："
-        kubectl exec -n ess "$pod_name" -- cat /conf/config.yaml 2>/dev/null || echo "无法读取配置文件"
+        local livekit_config=$(kubectl exec -n ess "$pod_name" -- cat /conf/config.yaml 2>/dev/null || echo "")
+        echo "$livekit_config"
+
+        # 检查外部IP配置
+        echo ""
+        echo "外部IP配置分析："
+        if echo "$livekit_config" | grep -q "use_external_ip: true"; then
+            echo "✅ use_external_ip: true (已启用)"
+
+            # 检查是否有明确的外部IP配置
+            if echo "$livekit_config" | grep -q "external_ip:"; then
+                local external_ip=$(echo "$livekit_config" | grep "external_ip:" | awk '{print $2}')
+                echo "✅ 明确配置的外部IP: $external_ip"
+            else
+                echo "⚠️  未明确配置外部IP，LiveKit将尝试自动检测"
+                echo "⚠️  这可能导致使用不正确的IP获取方法"
+                echo ""
+                read -p "是否修复LiveKit外部IP配置? [y/N]: " fix_ip || fix_ip=""
+                if [[ "$fix_ip" =~ ^[Yy]$ ]]; then
+                    fix_livekit_external_ip
+                fi
+            fi
+        else
+            echo "❌ use_external_ip未启用或配置错误"
+        fi
 
         # 检查Pod日志
         echo ""
