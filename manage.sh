@@ -1119,16 +1119,60 @@ fix_webrtc_ports_advanced() {
     echo ""
     echo -e "${BLUE}=== WebRTC端口问题深度分析 ===${NC}"
 
-    # 1. 检查ESS Helm配置
-    log_info "1. 检查ESS Helm配置中的Matrix RTC设置..."
-    if helm get values ess -n ess | grep -A 20 "matrix-rtc" 2>/dev/null; then
-        echo "找到Matrix RTC配置"
-    else
-        log_error "ESS Helm配置中可能缺少Matrix RTC配置"
+    # 1. 检查ESS Helm配置和Matrix RTC支持
+    log_info "1. 检查ESS部署和Matrix RTC支持..."
+
+    # 检查ESS版本
+    local ess_version=$(helm list -n ess -o json | jq -r '.[] | select(.name=="ess") | .app_version' 2>/dev/null || echo "")
+    local chart_version=$(helm list -n ess -o json | jq -r '.[] | select(.name=="ess") | .chart' 2>/dev/null || echo "")
+
+    echo "ESS部署信息："
+    echo "• Chart版本: $chart_version"
+    echo "• App版本: $ess_version"
+
+    # 检查Matrix RTC相关资源
+    echo ""
+    echo "Matrix RTC资源检查："
+
+    local rtc_deployments=$(kubectl get deployment -n ess | grep matrix-rtc | wc -l)
+    local rtc_services=$(kubectl get svc -n ess | grep matrix-rtc | wc -l)
+    local rtc_configmaps=$(kubectl get configmap -n ess | grep matrix-rtc | wc -l)
+
+    echo "• Matrix RTC Deployments: $rtc_deployments"
+    echo "• Matrix RTC Services: $rtc_services"
+    echo "• Matrix RTC ConfigMaps: $rtc_configmaps"
+
+    if [[ $rtc_deployments -gt 0 && $rtc_services -gt 0 ]]; then
+        log_success "Matrix RTC组件已部署"
+
+        # 检查Helm values中的Matrix RTC配置
         echo ""
-        echo "可能的解决方案："
-        echo "1. 重新部署ESS并确保启用Matrix RTC功能"
-        echo "2. 检查ESS版本是否支持Matrix RTC"
+        echo "Helm values中的Matrix RTC配置："
+        local rtc_config=$(helm get values ess -n ess 2>/dev/null | grep -A 20 -B 5 "matrix-rtc" || echo "未找到明确的matrix-rtc配置")
+        echo "$rtc_config"
+
+    else
+        log_error "Matrix RTC组件未完整部署"
+        echo ""
+        echo "检测到的问题："
+        echo "• Matrix RTC Deployments: $rtc_deployments (期望: ≥2)"
+        echo "• Matrix RTC Services: $rtc_services (期望: ≥2)"
+        echo ""
+        echo "可能的原因："
+        echo "1. ESS部署时未启用Matrix RTC功能"
+        echo "2. ESS版本不支持Matrix RTC"
+        echo "3. 部署过程中出现错误"
+        echo ""
+        echo "建议的解决方案："
+        echo "1. 检查ESS部署values是否启用了Matrix RTC"
+        echo "2. 重新部署ESS并确保启用Matrix RTC功能"
+        echo "3. 升级到支持Matrix RTC的ESS版本"
+
+        read -p "是否尝试修复Matrix RTC部署? [y/N]: " fix_deployment || fix_deployment=""
+        if [[ "$fix_deployment" =~ ^[Yy]$ ]]; then
+            fix_matrix_rtc_deployment
+        fi
+
         return 1
     fi
 
@@ -1259,6 +1303,66 @@ EOF
 
     echo ""
 
+    # 3.5. 修复iptables规则（如果缺失）
+    log_info "3.5. 检查和修复iptables规则..."
+
+    local iptables_tcp_exists=$(sudo iptables -t nat -L -n | grep -c "30881" || echo "0")
+    local iptables_udp_exists=$(sudo iptables -t nat -L -n | grep -c "30882" || echo "0")
+
+    echo "iptables规则检查："
+    echo "• TCP 30881规则数量: $iptables_tcp_exists"
+    echo "• UDP 30882规则数量: $iptables_udp_exists"
+
+    if [[ $iptables_tcp_exists -eq 0 || $iptables_udp_exists -eq 0 ]]; then
+        log_warning "iptables规则缺失，这是外部无法访问WebRTC端口的根本原因"
+
+        read -p "是否尝试修复iptables规则? [y/N]: " fix_iptables || fix_iptables=""
+        if [[ "$fix_iptables" =~ ^[Yy]$ ]]; then
+            log_info "修复iptables规则..."
+
+            # 重启kube-proxy以重新生成iptables规则
+            log_info "重启kube-proxy以重新生成iptables规则..."
+            sudo systemctl restart kube-proxy
+
+            # 等待kube-proxy重启
+            sleep 10
+
+            # 重启kubelet
+            log_info "重启kubelet..."
+            sudo systemctl restart kubelet
+
+            # 等待服务重启
+            sleep 15
+
+            # 检查规则是否已生成
+            local new_tcp_rules=$(sudo iptables -t nat -L -n | grep -c "30881" || echo "0")
+            local new_udp_rules=$(sudo iptables -t nat -L -n | grep -c "30882" || echo "0")
+
+            echo "修复后iptables规则："
+            echo "• TCP 30881规则数量: $new_tcp_rules"
+            echo "• UDP 30882规则数量: $new_udp_rules"
+
+            if [[ $new_tcp_rules -gt 0 && $new_udp_rules -gt 0 ]]; then
+                log_success "iptables规则修复成功！"
+            else
+                log_warning "iptables规则仍然缺失，可能需要手动修复"
+                echo ""
+                echo "手动修复命令："
+                echo "sudo systemctl restart kube-proxy"
+                echo "sudo systemctl restart kubelet"
+                echo ""
+                echo "如果问题持续，可能需要："
+                echo "1. 检查K3s网络配置"
+                echo "2. 重启K3s服务"
+                echo "3. 重新创建NodePort服务"
+            fi
+        fi
+    else
+        log_success "iptables规则存在"
+    fi
+
+    echo ""
+
     # 4. 强制重启所有相关组件
     log_info "4. 强制重启所有相关组件..."
 
@@ -1317,6 +1421,110 @@ EOF
         echo "• 检查LiveKit配置: kubectl exec -n ess \$(kubectl get pods -n ess -l app.kubernetes.io/name=matrix-rtc-sfu -o name | cut -d/ -f2) -- cat /conf/config.yaml"
         return 1
     fi
+}
+
+# 修复Matrix RTC部署
+fix_matrix_rtc_deployment() {
+    log_info "尝试修复Matrix RTC部署..."
+
+    echo ""
+    echo "Matrix RTC修复选项："
+    echo "1) 通过Helm values启用Matrix RTC"
+    echo "2) 检查并修复现有部署"
+    echo "3) 重新部署ESS并启用Matrix RTC"
+    echo "0) 跳过修复"
+    echo ""
+
+    read -p "请选择修复方法 [0-3]: " fix_choice || fix_choice=""
+
+    case $fix_choice in
+        1)
+            log_info "通过Helm values启用Matrix RTC..."
+
+            # 创建临时values文件
+            local temp_values="/tmp/ess-matrix-rtc-values-$(date +%Y%m%d-%H%M%S).yaml"
+
+            cat > "$temp_values" <<EOF
+# 启用Matrix RTC功能
+matrix-rtc:
+  enabled: true
+  sfu:
+    enabled: true
+    config:
+      rtc:
+        use_external_ip: true
+        tcp_port: 30881
+        udp_port: 30882
+      port: 7880
+      prometheus_port: 6789
+      logging:
+        level: info
+        json: false
+        pion_level: error
+      turn:
+        enabled: false
+  authorisation-service:
+    enabled: true
+EOF
+
+            log_info "应用Matrix RTC配置..."
+            if helm upgrade ess oci://ghcr.io/element-hq/ess-helm/ess-community -n ess -f "$temp_values" --reuse-values; then
+                log_success "Matrix RTC配置已应用"
+
+                # 等待部署完成
+                log_info "等待Matrix RTC部署完成..."
+                kubectl rollout status deployment ess-matrix-rtc-sfu -n ess --timeout=300s
+                kubectl rollout status deployment ess-matrix-rtc-authorisation-service -n ess --timeout=300s
+
+                log_success "Matrix RTC部署修复完成"
+            else
+                log_error "Matrix RTC配置应用失败"
+            fi
+
+            # 清理临时文件
+            rm -f "$temp_values"
+            ;;
+
+        2)
+            log_info "检查并修复现有Matrix RTC部署..."
+
+            # 检查部署状态
+            echo "当前Matrix RTC部署状态："
+            kubectl get deployment -n ess | grep matrix-rtc || echo "未找到Matrix RTC部署"
+
+            # 尝试重启现有部署
+            if kubectl get deployment ess-matrix-rtc-sfu -n ess >/dev/null 2>&1; then
+                log_info "重启Matrix RTC SFU..."
+                kubectl rollout restart deployment ess-matrix-rtc-sfu -n ess
+                kubectl rollout status deployment ess-matrix-rtc-sfu -n ess --timeout=300s
+            fi
+
+            if kubectl get deployment ess-matrix-rtc-authorisation-service -n ess >/dev/null 2>&1; then
+                log_info "重启Matrix RTC授权服务..."
+                kubectl rollout restart deployment ess-matrix-rtc-authorisation-service -n ess
+                kubectl rollout status deployment ess-matrix-rtc-authorisation-service -n ess --timeout=300s
+            fi
+            ;;
+
+        3)
+            log_warning "重新部署ESS是一个重大操作，可能影响现有数据"
+            read -p "确认重新部署ESS? [y/N]: " confirm_redeploy || confirm_redeploy=""
+
+            if [[ "$confirm_redeploy" =~ ^[Yy]$ ]]; then
+                log_info "准备重新部署ESS..."
+                echo "请手动执行以下步骤："
+                echo "1. 备份当前配置: helm get values ess -n ess > ess-backup-values.yaml"
+                echo "2. 在values文件中启用matrix-rtc功能"
+                echo "3. 重新部署: helm upgrade ess oci://ghcr.io/element-hq/ess-helm/ess-community -n ess -f ess-backup-values.yaml"
+            else
+                log_info "跳过重新部署"
+            fi
+            ;;
+
+        0|*)
+            log_info "跳过Matrix RTC部署修复"
+            ;;
+    esac
 }
 
 # 验证配置
