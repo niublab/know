@@ -1148,8 +1148,40 @@ fix_webrtc_ports_advanced() {
         # 检查Helm values中的Matrix RTC配置
         echo ""
         echo "Helm values中的Matrix RTC配置："
-        local rtc_config=$(helm get values ess -n ess 2>/dev/null | grep -A 20 -B 5 "matrix-rtc" || echo "未找到明确的matrix-rtc配置")
+        local rtc_config=$(helm get values ess -n ess 2>/dev/null | grep -A 5 -B 2 "matrixRTC" || echo "未找到matrixRTC配置")
         echo "$rtc_config"
+
+        # 关键检查：NodePort服务
+        echo ""
+        log_info "检查关键的NodePort服务..."
+
+        local nodeport_tcp=$(kubectl get svc ess-matrix-rtc-sfu-tcp -n ess 2>/dev/null && echo "存在" || echo "缺失")
+        local nodeport_udp=$(kubectl get svc ess-matrix-rtc-sfu-muxed-udp -n ess 2>/dev/null && echo "存在" || echo "缺失")
+
+        echo "NodePort服务状态："
+        echo "• ess-matrix-rtc-sfu-tcp: $nodeport_tcp"
+        echo "• ess-matrix-rtc-sfu-muxed-udp: $nodeport_udp"
+
+        if [[ "$nodeport_tcp" == "缺失" || "$nodeport_udp" == "缺失" ]]; then
+            log_error "发现根本问题：NodePort服务缺失！"
+            echo ""
+            echo "这就是为什么iptables规则不存在的原因："
+            echo "• 只有ClusterIP服务，没有NodePort服务"
+            echo "• 没有NodePort服务就不会创建iptables规则"
+            echo "• 外部无法访问WebRTC端口"
+            echo ""
+
+            echo ""
+            echo "解决方案："
+            echo "1. 重新运行setup.sh的验证部署功能（推荐）"
+            echo "2. 手动创建NodePort服务"
+            echo ""
+            echo "推荐命令："
+            echo "curl -fsSL https://raw.githubusercontent.com/niublab/know/main/setup.sh | bash"
+            echo "然后选择选项7：验证部署"
+        else
+            log_success "NodePort服务存在"
+        fi
 
     else
         log_error "Matrix RTC组件未完整部署"
@@ -1525,6 +1557,140 @@ EOF
             log_info "跳过Matrix RTC部署修复"
             ;;
     esac
+}
+
+# 创建缺失的NodePort服务
+create_missing_nodeport_services() {
+    log_info "创建缺失的NodePort服务..."
+
+    # 检查现有的ClusterIP服务以获取正确的selector
+    local sfu_selector=$(kubectl get svc ess-matrix-rtc-sfu -n ess -o jsonpath='{.spec.selector}' 2>/dev/null || echo "")
+
+    if [[ -z "$sfu_selector" ]]; then
+        log_error "无法获取Matrix RTC SFU服务的selector"
+        return 1
+    fi
+
+    echo "使用selector: $sfu_selector"
+
+    # 创建TCP NodePort服务
+    log_info "创建TCP NodePort服务 (30881)..."
+    cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: ess-matrix-rtc-sfu-tcp
+  namespace: ess
+  labels:
+    app.kubernetes.io/component: matrix-rtc-voip-server
+    app.kubernetes.io/instance: ess-matrix-rtc-sfu-rtc
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: matrix-rtc-sfu-rtc
+    app.kubernetes.io/part-of: matrix-stack
+    app.kubernetes.io/version: v1.7.2
+    helm.sh/chart: matrix-stack-25.6.1
+  annotations:
+    meta.helm.sh/release-name: ess
+    meta.helm.sh/release-namespace: ess
+spec:
+  type: NodePort
+  externalTrafficPolicy: Local
+  internalTrafficPolicy: Cluster
+  ports:
+  - name: rtc-tcp
+    port: 30881
+    protocol: TCP
+    targetPort: 30881
+    nodePort: 30881
+  selector:
+    app.kubernetes.io/instance: ess-matrix-rtc-sfu
+EOF
+
+    if [[ $? -eq 0 ]]; then
+        log_success "TCP NodePort服务创建成功"
+    else
+        log_error "TCP NodePort服务创建失败"
+        return 1
+    fi
+
+    # 创建UDP NodePort服务
+    log_info "创建UDP NodePort服务 (30882)..."
+    cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: ess-matrix-rtc-sfu-muxed-udp
+  namespace: ess
+  labels:
+    app.kubernetes.io/component: matrix-rtc-voip-server
+    app.kubernetes.io/instance: ess-matrix-rtc-sfu-rtc
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: matrix-rtc-sfu-rtc
+    app.kubernetes.io/part-of: matrix-stack
+    app.kubernetes.io/version: v1.7.2
+    helm.sh/chart: matrix-stack-25.6.1
+  annotations:
+    meta.helm.sh/release-name: ess
+    meta.helm.sh/release-namespace: ess
+spec:
+  type: NodePort
+  externalTrafficPolicy: Local
+  internalTrafficPolicy: Cluster
+  ports:
+  - name: rtc-muxed-udp
+    port: 30882
+    protocol: UDP
+    targetPort: 30882
+    nodePort: 30882
+  selector:
+    app.kubernetes.io/instance: ess-matrix-rtc-sfu
+EOF
+
+    if [[ $? -eq 0 ]]; then
+        log_success "UDP NodePort服务创建成功"
+    else
+        log_error "UDP NodePort服务创建失败"
+        return 1
+    fi
+
+    # 等待服务创建完成
+    sleep 10
+
+    # 验证服务创建
+    log_info "验证NodePort服务创建..."
+
+    local tcp_service=$(kubectl get svc ess-matrix-rtc-sfu-tcp -n ess 2>/dev/null && echo "✅ 存在" || echo "❌ 缺失")
+    local udp_service=$(kubectl get svc ess-matrix-rtc-sfu-muxed-udp -n ess 2>/dev/null && echo "✅ 存在" || echo "❌ 缺失")
+
+    echo "NodePort服务验证："
+    echo "• TCP服务: $tcp_service"
+    echo "• UDP服务: $udp_service"
+
+    # 检查iptables规则是否已生成
+    sleep 5
+    local new_tcp_rules=$(sudo iptables -t nat -L -n | grep -c "30881" || echo "0")
+    local new_udp_rules=$(sudo iptables -t nat -L -n | grep -c "30882" || echo "0")
+
+    echo ""
+    echo "iptables规则生成检查："
+    echo "• TCP 30881规则: $new_tcp_rules"
+    echo "• UDP 30882规则: $new_udp_rules"
+
+    if [[ $new_tcp_rules -gt 0 && $new_udp_rules -gt 0 ]]; then
+        log_success "🎉 NodePort服务创建成功，iptables规则已自动生成！"
+        echo ""
+        echo "Element Call现在应该可以正常工作了！"
+        echo ""
+        echo "测试步骤："
+        echo "1. 清除浏览器缓存"
+        echo "2. 访问 https://app.niub.win:8443"
+        echo "3. 创建房间并测试视频通话"
+        return 0
+    else
+        log_warning "NodePort服务已创建，但iptables规则可能需要时间生成"
+        echo "请等待几分钟后再测试Element Call"
+        return 0
+    fi
 }
 
 # 验证配置

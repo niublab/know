@@ -566,6 +566,10 @@ verify_deployment() {
     log_info "检查证书状态..."
     kubectl get certificates -n "$NAMESPACE"
 
+    # 检查Matrix RTC NodePort服务（关键修复）
+    log_info "检查Matrix RTC NodePort服务..."
+    verify_matrix_rtc_nodeport_services
+
     # 显示访问信息
     if [[ -f "$CONFIG_DIR/hostnames.yaml" ]]; then
         local web_host=$(grep -A2 "elementWeb:" "$CONFIG_DIR/hostnames.yaml" | grep "host:" | awk '{print $2}')
@@ -594,6 +598,166 @@ verify_deployment() {
     fi
 
     log_success "部署验证完成"
+}
+
+# 验证并修复Matrix RTC NodePort服务
+verify_matrix_rtc_nodeport_services() {
+    log_info "验证Matrix RTC NodePort服务..."
+
+    # 检查Matrix RTC部署是否存在
+    local rtc_sfu_exists=$(kubectl get deployment ess-matrix-rtc-sfu -n "$NAMESPACE" 2>/dev/null && echo "true" || echo "false")
+    local rtc_auth_exists=$(kubectl get deployment ess-matrix-rtc-authorisation-service -n "$NAMESPACE" 2>/dev/null && echo "true" || echo "false")
+
+    if [[ "$rtc_sfu_exists" == "false" || "$rtc_auth_exists" == "false" ]]; then
+        log_warning "Matrix RTC组件未完整部署，跳过NodePort服务检查"
+        echo "• Matrix RTC SFU: $rtc_sfu_exists"
+        echo "• Matrix RTC Auth: $rtc_auth_exists"
+        return 0
+    fi
+
+    log_success "Matrix RTC组件已部署"
+
+    # 检查NodePort服务
+    local tcp_nodeport=$(kubectl get svc ess-matrix-rtc-sfu-tcp -n "$NAMESPACE" 2>/dev/null && echo "存在" || echo "缺失")
+    local udp_nodeport=$(kubectl get svc ess-matrix-rtc-sfu-muxed-udp -n "$NAMESPACE" 2>/dev/null && echo "存在" || echo "缺失")
+
+    echo "NodePort服务状态："
+    echo "• TCP NodePort (30881): $tcp_nodeport"
+    echo "• UDP NodePort (30882): $udp_nodeport"
+
+    if [[ "$tcp_nodeport" == "缺失" || "$udp_nodeport" == "缺失" ]]; then
+        log_warning "发现NodePort服务缺失 - 这会导致Element Call无法工作"
+        echo ""
+        echo "NodePort服务是Element Call正常工作的必需组件"
+        echo "缺失这些服务会导致外部无法访问WebRTC端口"
+        echo ""
+
+        read -p "是否自动创建缺失的NodePort服务? [Y/n]: " create_services || create_services="y"
+
+        if [[ "$create_services" =~ ^[Nn]$ ]]; then
+            log_warning "跳过NodePort服务创建"
+            echo "注意：Element Call可能无法正常工作"
+            return 0
+        fi
+
+        log_info "创建缺失的NodePort服务..."
+        create_matrix_rtc_nodeport_services
+
+    else
+        log_success "NodePort服务配置正确"
+    fi
+}
+
+# 创建Matrix RTC NodePort服务
+create_matrix_rtc_nodeport_services() {
+    log_info "创建Matrix RTC NodePort服务..."
+
+    # 创建TCP NodePort服务
+    if ! kubectl get svc ess-matrix-rtc-sfu-tcp -n "$NAMESPACE" >/dev/null 2>&1; then
+        log_info "创建TCP NodePort服务 (30881)..."
+        cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: ess-matrix-rtc-sfu-tcp
+  namespace: $NAMESPACE
+  labels:
+    app.kubernetes.io/component: matrix-rtc-voip-server
+    app.kubernetes.io/instance: ess-matrix-rtc-sfu-rtc
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: matrix-rtc-sfu-rtc
+    app.kubernetes.io/part-of: matrix-stack
+    app.kubernetes.io/version: v1.7.2
+    helm.sh/chart: matrix-stack-25.6.1
+  annotations:
+    meta.helm.sh/release-name: ess
+    meta.helm.sh/release-namespace: $NAMESPACE
+spec:
+  type: NodePort
+  externalTrafficPolicy: Local
+  internalTrafficPolicy: Cluster
+  ports:
+  - name: rtc-tcp
+    port: 30881
+    protocol: TCP
+    targetPort: 30881
+    nodePort: 30881
+  selector:
+    app.kubernetes.io/instance: ess-matrix-rtc-sfu
+EOF
+
+        if [[ $? -eq 0 ]]; then
+            log_success "TCP NodePort服务创建成功"
+        else
+            log_error "TCP NodePort服务创建失败"
+            return 1
+        fi
+    fi
+
+    # 创建UDP NodePort服务
+    if ! kubectl get svc ess-matrix-rtc-sfu-muxed-udp -n "$NAMESPACE" >/dev/null 2>&1; then
+        log_info "创建UDP NodePort服务 (30882)..."
+        cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: ess-matrix-rtc-sfu-muxed-udp
+  namespace: $NAMESPACE
+  labels:
+    app.kubernetes.io/component: matrix-rtc-voip-server
+    app.kubernetes.io/instance: ess-matrix-rtc-sfu-rtc
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: matrix-rtc-sfu-rtc
+    app.kubernetes.io/part-of: matrix-stack
+    app.kubernetes.io/version: v1.7.2
+    helm.sh/chart: matrix-stack-25.6.1
+  annotations:
+    meta.helm.sh/release-name: ess
+    meta.helm.sh/release-namespace: $NAMESPACE
+spec:
+  type: NodePort
+  externalTrafficPolicy: Local
+  internalTrafficPolicy: Cluster
+  ports:
+  - name: rtc-muxed-udp
+    port: 30882
+    protocol: UDP
+    targetPort: 30882
+    nodePort: 30882
+  selector:
+    app.kubernetes.io/instance: ess-matrix-rtc-sfu
+EOF
+
+        if [[ $? -eq 0 ]]; then
+            log_success "UDP NodePort服务创建成功"
+        else
+            log_error "UDP NodePort服务创建失败"
+            return 1
+        fi
+    fi
+
+    # 等待服务创建完成
+    sleep 5
+
+    # 验证服务创建
+    local tcp_created=$(kubectl get svc ess-matrix-rtc-sfu-tcp -n "$NAMESPACE" 2>/dev/null && echo "✅" || echo "❌")
+    local udp_created=$(kubectl get svc ess-matrix-rtc-sfu-muxed-udp -n "$NAMESPACE" 2>/dev/null && echo "✅" || echo "❌")
+
+    echo ""
+    echo "NodePort服务创建结果："
+    echo "• TCP服务 (30881): $tcp_created"
+    echo "• UDP服务 (30882): $udp_created"
+
+    if [[ "$tcp_created" == "✅" && "$udp_created" == "✅" ]]; then
+        log_success "🎉 Matrix RTC NodePort服务创建成功！"
+        echo ""
+        echo "Element Call现在应该可以正常工作了！"
+        echo "iptables规则将在几分钟内自动生成"
+        return 0
+    else
+        log_error "NodePort服务创建不完整"
+        return 1
+    fi
 }
 
 # 主菜单
