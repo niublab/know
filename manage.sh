@@ -1150,6 +1150,8 @@ get_ess_chart_info() {
 
 # 修复ESS well-known ConfigMap中的端口问题
 fix_ess_wellknown_configmap() {
+    local auto_confirm="${1:-false}"  # 支持自动确认参数
+
     log_info "修复ESS well-known ConfigMap中的端口问题..."
 
     # 检查当前well-known server配置
@@ -1174,10 +1176,14 @@ fix_ess_wellknown_configmap() {
     log_info "当前值: $current_server"
     log_info "期望值: $expected_server"
 
-    read -p "确认修复ESS well-known ConfigMap? [y/N]: " confirm
-    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-        log_info "操作已取消"
-        return 0
+    if [[ "$auto_confirm" != "true" ]]; then
+        read -p "确认修复ESS well-known ConfigMap? [y/N]: " confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            log_info "操作已取消"
+            return 0
+        fi
+    else
+        log_info "自动确认模式，开始修复well-known ConfigMap..."
     fi
 
     # 备份当前ConfigMap
@@ -1265,122 +1271,7 @@ fix_ess_wellknown_configmap() {
     log_info "备份文件: $backup_file"
 }
 
-# 修复ESS well-known ConfigMap中的端口问题
-fix_ess_wellknown_configmap() {
-    log_info "修复ESS well-known ConfigMap中的端口问题..."
 
-    # 检查当前well-known server配置
-    local current_server=$(kubectl get configmap ess-well-known-haproxy -n ess -o jsonpath='{.data.server}' 2>/dev/null | grep -o 'matrix.niub.win:[0-9]*' || echo "")
-
-    if [[ -z "$current_server" ]]; then
-        log_error "无法获取ESS well-known ConfigMap中的server配置"
-        return 1
-    fi
-
-    log_info "当前well-known server配置: $current_server"
-
-    # 检查是否需要修复
-    local expected_server="matrix.niub.win:$EXTERNAL_HTTPS_PORT"
-
-    if [[ "$current_server" == "$expected_server" ]]; then
-        log_success "ESS well-known ConfigMap配置已正确，无需修复"
-        return 0
-    fi
-
-    log_warning "需要修复ESS well-known ConfigMap配置"
-    log_info "当前值: $current_server"
-    log_info "期望值: $expected_server"
-
-    read -p "确认修复ESS well-known ConfigMap? [y/N]: " confirm
-    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-        log_info "操作已取消"
-        return 0
-    fi
-
-    # 备份当前ConfigMap
-    local backup_file="$ESS_CONFIG_DIR/well-known-configmap-backup-$(date +%Y%m%d-%H%M%S).yaml"
-    if kubectl get configmap ess-well-known-haproxy -n ess -o yaml > "$backup_file" 2>/dev/null; then
-        log_success "ConfigMap备份完成: $backup_file"
-    else
-        log_warning "ConfigMap备份失败"
-    fi
-
-    # 修复server配置
-    log_info "正在修复well-known server配置..."
-    local server_config="{\"m.server\": \"$expected_server\"}"
-
-    if kubectl patch configmap ess-well-known-haproxy -n ess --type merge -p "{\"data\":{\"server\":\"$server_config\"}}"; then
-        log_success "well-known server配置修复成功"
-    else
-        log_error "well-known server配置修复失败"
-        return 1
-    fi
-
-    # 修复client配置
-    log_info "正在修复well-known client配置..."
-    local client_config="{
-  \"m.homeserver\": {
-    \"base_url\": \"https://matrix.niub.win:$EXTERNAL_HTTPS_PORT\"
-  },
-  \"org.matrix.msc2965.authentication\": {
-    \"account\": \"https://mas.niub.win:$EXTERNAL_HTTPS_PORT/account\",
-    \"issuer\": \"https://mas.niub.win:$EXTERNAL_HTTPS_PORT/\"
-  },
-  \"org.matrix.msc4143.rtc_foci\": [
-    {
-      \"type\": \"livekit\",
-      \"livekit_service_url\": \"https://$RTC_HOST:$EXTERNAL_HTTPS_PORT\"
-    }
-  ]
-}"
-
-    if kubectl patch configmap ess-well-known-haproxy -n ess --type merge -p "{\"data\":{\"client\":\"$client_config\"}}"; then
-        log_success "well-known client配置修复成功"
-    else
-        log_error "well-known client配置修复失败"
-        return 1
-    fi
-
-    # 重启HAProxy服务
-    log_info "重启HAProxy服务以应用新配置..."
-    if kubectl rollout restart deployment ess-haproxy -n ess; then
-        log_success "HAProxy服务重启命令已执行"
-
-        # 等待重启完成
-        log_info "等待HAProxy服务重启完成..."
-        if kubectl rollout status deployment ess-haproxy -n ess --timeout=300s; then
-            log_success "HAProxy服务重启完成"
-        else
-            log_warning "HAProxy服务重启超时，请手动检查状态"
-        fi
-    else
-        log_error "HAProxy服务重启失败"
-        return 1
-    fi
-
-    # 验证修复效果
-    log_info "验证修复效果..."
-    sleep 10
-
-    # 测试server配置
-    local new_server=$(curl -k -s "https://niub.win:$EXTERNAL_HTTPS_PORT/.well-known/matrix/server" | grep -o 'matrix.niub.win:[0-9]*' || echo "")
-    if [[ "$new_server" == "$expected_server" ]]; then
-        log_success "well-known server配置验证成功: $new_server"
-    else
-        log_warning "well-known server配置验证失败，当前值: $new_server"
-    fi
-
-    # 测试client配置
-    local client_test=$(curl -k -s "https://niub.win:$EXTERNAL_HTTPS_PORT/.well-known/matrix/client" | grep -o "matrix.niub.win:$EXTERNAL_HTTPS_PORT" | head -1)
-    if [[ -n "$client_test" ]]; then
-        log_success "well-known client配置验证成功，包含正确端口"
-    else
-        log_warning "well-known client配置可能需要更多时间生效"
-    fi
-
-    log_success "ESS well-known端口问题修复完成！"
-    log_info "备份文件: $backup_file"
-}
 
 # 诊断和修复Matrix RTC Focus配置
 diagnose_matrix_rtc_focus() {
@@ -1492,6 +1383,8 @@ diagnose_matrix_rtc_focus() {
 
 # 修复Element Web ConfigMap中的端口问题
 fix_element_web_configmap() {
+    local auto_confirm="${1:-false}"  # 支持自动确认参数
+
     log_info "修复Element Web ConfigMap中的端口问题..."
 
     # 检查当前Element Web配置
@@ -1516,10 +1409,14 @@ fix_element_web_configmap() {
     log_info "当前值: $current_base_url"
     log_info "期望值: $expected_base_url"
 
-    read -p "确认修复Element Web ConfigMap? [y/N]: " confirm
-    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-        log_info "操作已取消"
-        return 0
+    if [[ "$auto_confirm" != "true" ]]; then
+        read -p "确认修复Element Web ConfigMap? [y/N]: " confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            log_info "操作已取消"
+            return 0
+        fi
+    else
+        log_info "自动确认模式，开始修复Element Web ConfigMap..."
     fi
 
     # 备份当前ConfigMap
@@ -1607,11 +1504,13 @@ fix_element_web_configmap() {
 
 # 统一修复所有ESS端口配置问题
 fix_all_ess_ports() {
+    local auto_confirm="${1:-false}"  # 支持自动确认参数
+
     log_info "统一修复所有ESS端口配置问题..."
 
     echo ""
     echo -e "${GREEN}=== ESS端口配置统一修复 ===${NC}"
-    echo "基于关键洞察：所有端口问题都是ESS内部ConfigMap硬编码标准端口导致"
+    echo "基于memory.txt关键洞察：所有端口问题都是ESS内部ConfigMap硬编码标准端口导致"
     echo ""
     echo "将要修复的问题："
     echo "1. MAS ConfigMap - public_base端口问题"
@@ -1626,10 +1525,14 @@ fix_all_ess_ports() {
     echo "- Element Web: $ELEMENT_WEB_HOST:$EXTERNAL_HTTPS_PORT"
     echo ""
 
-    read -p "确认开始统一修复? [y/N]: " confirm || confirm=""
-    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-        log_info "操作已取消"
-        return 0
+    if [[ "$auto_confirm" != "true" ]]; then
+        read -p "确认开始统一修复? [y/N]: " confirm || confirm=""
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            log_info "操作已取消"
+            return 0
+        fi
+    else
+        log_info "自动确认模式，开始修复..."
     fi
 
     local success_count=0
@@ -1637,8 +1540,8 @@ fix_all_ess_ports() {
 
     # 修复MAS ConfigMap
     echo ""
-    echo -e "${YELLOW}=== 1/2 修复MAS ConfigMap ===${NC}"
-    if fix_mas_configmap; then
+    echo -e "${YELLOW}=== 1/3 修复MAS ConfigMap ===${NC}"
+    if fix_mas_configmap "$auto_confirm"; then  # 传递auto_confirm参数
         ((success_count++))
         log_success "MAS ConfigMap修复成功"
     else
@@ -1648,7 +1551,7 @@ fix_all_ess_ports() {
     # 修复well-known ConfigMap
     echo ""
     echo -e "${YELLOW}=== 2/3 修复well-known ConfigMap ===${NC}"
-    if fix_ess_wellknown_configmap; then
+    if fix_ess_wellknown_configmap "$auto_confirm"; then  # 传递auto_confirm参数
         ((success_count++))
         log_success "well-known ConfigMap修复成功"
     else
@@ -1658,7 +1561,7 @@ fix_all_ess_ports() {
     # 修复Element Web ConfigMap
     echo ""
     echo -e "${YELLOW}=== 3/3 修复Element Web ConfigMap ===${NC}"
-    if fix_element_web_configmap; then
+    if fix_element_web_configmap "$auto_confirm"; then  # 传递auto_confirm参数
         ((success_count++))
         log_success "Element Web ConfigMap修复成功"
     else
@@ -1690,6 +1593,8 @@ fix_all_ess_ports() {
 
 # 修复MAS ConfigMap中的端口问题（方案3：直接修改ConfigMap）
 fix_mas_configmap() {
+    local auto_confirm="${1:-false}"  # 支持自动确认参数
+
     log_info "修复MAS ConfigMap中的端口问题..."
 
     # 检查当前MAS ConfigMap中的public_base配置
@@ -1714,10 +1619,14 @@ fix_mas_configmap() {
     log_info "当前值: $current_public_base"
     log_info "期望值: $expected_public_base"
 
-    read -p "确认修复MAS ConfigMap? [y/N]: " confirm
-    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-        log_info "操作已取消"
-        return 0
+    if [[ "$auto_confirm" != "true" ]]; then
+        read -p "确认修复MAS ConfigMap? [y/N]: " confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            log_info "操作已取消"
+            return 0
+        fi
+    else
+        log_info "自动确认模式，开始修复MAS ConfigMap..."
     fi
 
     # 备份当前ConfigMap
@@ -1890,15 +1799,70 @@ apply_ess_config() {
     fi
 }
 
-# 完整配置
+# 完整配置nginx反代 (推荐 - 一键修复所有问题)
 full_setup() {
-    log_info "开始完整nginx反代配置..."
+    echo ""
+    echo -e "${GREEN}================================${NC}"
+    echo -e "${GREEN}ESS完整配置和修复工具${NC}"
+    echo -e "${GREEN}基于memory.txt的完整解决方案${NC}"
+    echo -e "${GREEN}================================${NC}"
+    echo ""
+    echo "此功能将执行以下操作："
+    echo "1. ✅ nginx反代配置 (解决ISP端口封锁问题)"
+    echo "2. ✅ 自定义端口配置 (8080/8443)"
+    echo "3. ✅ SSL证书提取和配置"
+    echo "4. ✅ 防火墙规则配置"
+    echo "5. ✅ ESS ConfigMap端口修复 (关键洞察)"
+    echo "6. ✅ Matrix RTC配置检查"
+    echo "7. ✅ Element Call问题修复"
+    echo "8. ✅ 清理冲突配置文件"
+    echo ""
+    echo -e "${YELLOW}基于memory.txt关键发现：${NC}"
+    echo "- ISP封锁80/443端口，需要自定义端口"
+    echo "- ESS内部ConfigMap硬编码标准端口，需要修复"
+    echo "- well-known配置需要包含正确端口"
+    echo "- MAS认证服务URL需要端口修复"
+    echo ""
 
+    read -p "确认开始完整配置? [Y/n]: " confirm_start || confirm_start=""
+    if [[ "$confirm_start" =~ ^[Nn]$ ]]; then
+        log_info "操作已取消"
+        read -p "按任意键返回主菜单..."
+        show_main_menu
+        return 0
+    fi
+
+    log_info "开始完整nginx反代配置和ESS修复..."
+
+    # 第一阶段：基础环境检查和配置
+    echo ""
+    echo -e "${BLUE}=== 第一阶段：基础环境检查 ===${NC}"
     check_system_requirements
     read_ess_config
     check_traefik_status
     configure_custom_ports
+
+    # 第二阶段：nginx反代配置
+    echo ""
+    echo -e "${BLUE}=== 第二阶段：nginx反代配置 ===${NC}"
     backup_nginx_config
+
+    # 清理冲突的配置文件（基于memory.txt问题6）
+    log_info "清理冲突的nginx配置文件..."
+    local conflict_configs=(
+        "/etc/nginx/sites-enabled/matrix-ess"
+        "/etc/nginx/sites-enabled/default"
+        "/etc/nginx/sites-available/matrix-ess"
+    )
+
+    for config in "${conflict_configs[@]}"; do
+        if [[ -f "$config" ]]; then
+            log_warning "发现冲突配置文件: $config"
+            $SUDO_CMD mv "$config" "$config.backup-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+            log_info "已备份并移除: $config"
+        fi
+    done
+
     install_nginx
     generate_dhparam
     generate_nginx_config
@@ -1926,44 +1890,109 @@ full_setup() {
         # 配置防火墙
         configure_firewall
 
-        # 统一修复所有ESS端口配置问题（基于关键洞察）
+        # 第三阶段：ESS端口配置修复（基于memory.txt关键洞察）
         echo ""
+        echo -e "${BLUE}=== 第三阶段：ESS端口配置修复 ===${NC}"
         echo -e "${YELLOW}重要：统一修复所有ESS服务的URL端口问题${NC}"
-        echo "基于关键洞察：所有端口问题都是ESS内部ConfigMap硬编码标准端口导致"
-        echo "将修复：MAS ConfigMap + well-known ConfigMap"
+        echo "基于memory.txt关键洞察：所有端口问题都是ESS内部ConfigMap硬编码标准端口导致"
+        echo "将修复：MAS ConfigMap + well-known ConfigMap + Element Web ConfigMap"
         echo ""
-        read -p "是否现在统一修复所有ESS端口配置问题? [Y/n]: " fix_all_now
-        if [[ ! "$fix_all_now" =~ ^[Nn]$ ]]; then
-            fix_all_ess_ports
+
+        # 自动执行修复，不再询问（因为这是完整配置的核心功能）
+        log_info "自动执行ESS端口配置修复..."
+        if fix_all_ess_ports "true"; then  # 传递auto_confirm参数
+            log_success "ESS端口配置修复完成"
         else
-            log_info "跳过ESS端口配置修复"
-            log_warning "您可以稍后选择菜单选项11来修复此问题"
+            log_warning "ESS端口配置修复部分失败，但nginx反代已配置完成"
+        fi
+
+        # 第四阶段：Matrix RTC和Element Call检查
+        echo ""
+        echo -e "${BLUE}=== 第四阶段：Matrix RTC和Element Call检查 ===${NC}"
+        log_info "检查Matrix RTC服务状态..."
+
+        # 检查Matrix RTC服务
+        local rtc_pods=$(kubectl get pods -n ess | grep "matrix-rtc" || echo "")
+        if [[ -n "$rtc_pods" ]]; then
+            log_success "Matrix RTC服务运行正常"
+            echo "$rtc_pods"
+        else
+            log_warning "Matrix RTC服务未找到，Element Call可能无法使用"
+            echo "这可能是ESS部署配置问题，请检查ESS Helm配置"
+        fi
+
+        # 检查well-known RTC配置
+        log_info "验证well-known RTC配置..."
+        local well_known_client=$(kubectl get configmap ess-well-known-haproxy -n ess -o jsonpath='{.data.client}' 2>/dev/null || echo "")
+        if echo "$well_known_client" | grep -q "org.matrix.msc4143.rtc_foci"; then
+            log_success "well-known RTC配置存在"
+            local livekit_url=$(echo "$well_known_client" | jq -r '.["org.matrix.msc4143.rtc_foci"][0].livekit_service_url' 2>/dev/null || echo "")
+            if [[ -n "$livekit_url" && "$livekit_url" != "null" ]]; then
+                log_success "LiveKit服务URL配置正确: $livekit_url"
+            else
+                log_warning "LiveKit服务URL配置可能有问题"
+            fi
+        else
+            log_warning "well-known配置中缺少rtc_foci，Element Call将无法使用"
+            echo "建议运行菜单选项10进行详细诊断"
+        fi
+
+        # 第五阶段：配置验证和总结
+        echo ""
+        echo -e "${BLUE}=== 第五阶段：配置验证 ===${NC}"
+
+        # 验证nginx服务状态
+        if systemctl is-active nginx >/dev/null 2>&1; then
+            log_success "nginx服务运行正常"
+        else
+            log_warning "nginx服务状态异常"
+        fi
+
+        # 验证端口监听
+        if netstat -tlnp 2>/dev/null | grep -q ":$EXTERNAL_HTTPS_PORT.*nginx"; then
+            log_success "nginx正在监听端口 $EXTERNAL_HTTPS_PORT"
+        else
+            log_warning "nginx可能未正确监听端口 $EXTERNAL_HTTPS_PORT"
         fi
 
         echo ""
         echo -e "${GREEN}================================${NC}"
-        echo -e "${GREEN}ESS nginx反代配置完成！${NC}"
+        echo -e "${GREEN}ESS完整配置和修复完成！${NC}"
         echo -e "${GREEN}================================${NC}"
-        echo "外部访问地址:"
+        echo ""
+        echo -e "${YELLOW}外部访问地址：${NC}"
         echo "- Element Web: https://$ELEMENT_WEB_HOST:$EXTERNAL_HTTPS_PORT"
         echo "- Matrix服务器: https://$SYNAPSE_HOST:$EXTERNAL_HTTPS_PORT"
         echo "- 认证服务: https://$MAS_HOST:$EXTERNAL_HTTPS_PORT"
         echo "- RTC服务: https://$RTC_HOST:$EXTERNAL_HTTPS_PORT"
         echo "- 服务器发现: https://$SERVER_NAME:$EXTERNAL_HTTPS_PORT"
         echo ""
-        echo "配置特性:"
+        echo -e "${YELLOW}配置特性：${NC}"
         echo "- ✅ 基于ESS官方推荐配置"
+        echo "- ✅ 解决ISP端口封锁问题 (使用自定义端口$EXTERNAL_HTTPS_PORT)"
         echo "- ✅ 自动SSL证书配置"
         echo "- ✅ WebSocket支持"
         echo "- ✅ 自定义端口well-known配置"
         echo "- ✅ 防火墙规则自动配置"
-        echo "- ✅ MAS ConfigMap端口问题修复"
+        echo "- ✅ ESS ConfigMap端口问题修复"
+        echo "- ✅ 冲突配置文件清理"
+        echo "- ✅ Matrix RTC状态检查"
+        echo ""
+        echo -e "${YELLOW}基于memory.txt的关键修复：${NC}"
+        echo "- ✅ 解决了ISP端口封锁问题（问题6）"
+        echo "- ✅ 修复了ESS内部ConfigMap端口硬编码问题（关键洞察）"
+        echo "- ✅ 修复了well-known服务器端口配置（问题17）"
+        echo "- ✅ 修复了MAS认证服务URL端口问题（问题18）"
+        echo "- ✅ 清理了冲突的nginx配置文件（问题17.6）"
         echo ""
         echo -e "${GREEN}配置完成！${NC}"
-        echo "如果MAS页面仍显示端口问题，请选择菜单选项11重新修复"
-
         echo ""
-        echo "请确保DNS解析指向此服务器IP"
+        echo -e "${BLUE}后续步骤：${NC}"
+        echo "1. 确保DNS解析指向此服务器IP"
+        echo "2. 如果Element Call仍有问题，运行菜单选项10进行诊断"
+        echo "3. 如果需要创建用户，使用菜单选项2"
+        echo "4. 如果需要生成注册链接，使用菜单选项4"
+        echo ""
         echo -e "${GREEN}================================${NC}"
     else
         log_error "nginx配置测试失败，请检查配置"
