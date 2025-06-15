@@ -1327,15 +1327,28 @@ diagnose_matrix_rtc_focus() {
             # 检查配置格式
             local livekit_url=$(echo "$well_known_client" | jq -r '.["org.matrix.msc4143.rtc_foci"][0].livekit_service_url' 2>/dev/null || echo "")
             if [[ -n "$livekit_url" && "$livekit_url" != "null" ]]; then
-                echo -e "${GREEN}✅ LiveKit服务URL配置正确: $livekit_url${NC}"
+                echo -e "${GREEN}✅ LiveKit服务URL配置存在: $livekit_url${NC}"
 
-                # 测试URL可访问性
-                log_info "测试LiveKit服务URL可访问性..."
-                if curl -s --connect-timeout 10 "$livekit_url" >/dev/null 2>&1; then
-                    echo -e "${GREEN}✅ LiveKit服务URL可访问${NC}"
+                # 检查URL格式是否正确（应该包含自定义端口）
+                local expected_rtc_url="https://$RTC_HOST:$EXTERNAL_HTTPS_PORT"
+                if [[ "$livekit_url" == "$expected_rtc_url" ]]; then
+                    echo -e "${GREEN}✅ LiveKit服务URL端口配置正确${NC}"
                 else
-                    echo -e "${RED}❌ LiveKit服务URL不可访问${NC}"
-                    echo "这可能是端口配置或网络问题"
+                    echo -e "${YELLOW}⚠️  LiveKit服务URL端口可能需要修复${NC}"
+                    echo "   当前: $livekit_url"
+                    echo "   期望: $expected_rtc_url"
+                fi
+
+                # 测试URL可访问性（通过nginx反代）
+                log_info "测试LiveKit服务URL可访问性..."
+                # 注意：LiveKit服务通过nginx反代，直接访问可能返回404，这是正常的
+                local http_status=$(curl -k -s -o /dev/null -w "%{http_code}" --connect-timeout 10 "$livekit_url" 2>/dev/null || echo "000")
+                if [[ "$http_status" =~ ^[2-4][0-9][0-9]$ ]]; then
+                    echo -e "${GREEN}✅ LiveKit服务URL可访问 (HTTP $http_status)${NC}"
+                else
+                    echo -e "${YELLOW}⚠️  LiveKit服务URL访问异常 (HTTP $http_status)${NC}"
+                    echo "   这可能是正常的，LiveKit服务可能不响应根路径请求"
+                    echo "   建议检查Matrix RTC服务状态和网络配置"
                 fi
             else
                 echo -e "${RED}❌ LiveKit服务URL配置错误或缺失${NC}"
@@ -1365,17 +1378,53 @@ diagnose_matrix_rtc_focus() {
         echo -e "${YELLOW}建议1: Matrix RTC服务未部署，请检查ESS部署配置${NC}"
         echo "  - 确认ESS Helm chart包含Matrix RTC组件"
         echo "  - 检查部署日志: kubectl logs -n ess deployment/ess-matrix-rtc-sfu"
+    else
+        echo -e "${GREEN}✅ Matrix RTC服务已正确部署${NC}"
     fi
 
     if ! echo "$well_known_client" | grep -q "org.matrix.msc4143.rtc_foci"; then
         echo -e "${YELLOW}建议2: 修复well-known配置中的rtc_foci${NC}"
-        echo "  - 运行菜单选项12: 修复well-known配置"
+        echo "  - 运行菜单选项1: 完整配置nginx反代 (一键修复所有问题)"
+    else
+        # 检查LiveKit URL是否需要修复
+        local current_livekit_url=$(echo "$well_known_client" | jq -r '.["org.matrix.msc4143.rtc_foci"][0].livekit_service_url' 2>/dev/null || echo "")
+        local expected_rtc_url="https://$RTC_HOST:$EXTERNAL_HTTPS_PORT"
+        if [[ "$current_livekit_url" != "$expected_rtc_url" ]]; then
+            echo -e "${YELLOW}建议2: 修复LiveKit服务URL端口配置${NC}"
+            echo "  - 当前URL: $current_livekit_url"
+            echo "  - 期望URL: $expected_rtc_url"
+            echo "  - 运行菜单选项1: 完整配置nginx反代 (一键修复所有问题)"
+        else
+            echo -e "${GREEN}✅ well-known RTC配置正确${NC}"
+        fi
     fi
 
     echo -e "${YELLOW}建议3: 检查网络端口配置${NC}"
     echo "  - WebRTC TCP端口: 30881"
     echo "  - WebRTC UDP端口: 30882"
     echo "  - 确保防火墙开放这些端口"
+
+    # 基于实际诊断结果的具体建议
+    if [[ -n "$rtc_pods" && -n "$rtc_svc" && -n "$rtc_ingress" ]]; then
+        if echo "$well_known_client" | grep -q "org.matrix.msc4143.rtc_foci"; then
+            echo ""
+            echo -e "${GREEN}=== Element Call状态总结 ===${NC}"
+            echo -e "${GREEN}✅ Matrix RTC服务运行正常${NC}"
+            echo -e "${GREEN}✅ well-known配置包含rtc_foci${NC}"
+            echo ""
+            echo -e "${BLUE}如果Element Call仍然不工作，可能的原因：${NC}"
+            echo "1. 浏览器缓存问题 - 清除浏览器缓存并刷新"
+            echo "2. 网络防火墙阻止WebRTC流量"
+            echo "3. NAT/STUN配置问题"
+            echo "4. 客户端版本兼容性问题"
+            echo ""
+            echo -e "${YELLOW}建议测试步骤：${NC}"
+            echo "1. 访问 https://$ELEMENT_WEB_HOST:$EXTERNAL_HTTPS_PORT"
+            echo "2. 创建或加入一个房间"
+            echo "3. 尝试发起视频通话"
+            echo "4. 检查浏览器开发者工具的网络和控制台错误"
+        fi
+    fi
 
     echo ""
     read -p "按任意键返回主菜单..." || true
