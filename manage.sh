@@ -978,6 +978,115 @@ create_user() {
     user_management
 }
 
+# 修改用户密码
+change_user_password() {
+    echo ""
+    echo -e "${BLUE}=== 修改用户密码 ===${NC}"
+    echo ""
+
+    read -p "用户名: " username || username=""
+    if [[ -z "$username" ]]; then
+        log_error "用户名不能为空"
+        sleep 2
+        user_management
+        return
+    fi
+
+    read -s -p "新密码: " password || password=""
+    echo ""
+    if [[ -z "$password" ]]; then
+        log_error "密码不能为空"
+        sleep 2
+        user_management
+        return
+    fi
+
+    log_info "修改用户密码: $username"
+
+    if kubectl exec -n ess deployment/ess-matrix-authentication-service -- mas-cli manage set-password --password "$password" "$username"; then
+        log_success "密码修改成功"
+    else
+        log_error "密码修改失败"
+    fi
+
+    echo ""
+    read -p "按任意键继续..." -n 1
+    user_management
+}
+
+# 锁定用户
+lock_user() {
+    echo ""
+    echo -e "${BLUE}=== 锁定用户 ===${NC}"
+    echo ""
+
+    read -p "用户名: " username || username=""
+    if [[ -z "$username" ]]; then
+        log_error "用户名不能为空"
+        sleep 2
+        user_management
+        return
+    fi
+
+    log_info "锁定用户: $username"
+
+    if kubectl exec -n ess deployment/ess-matrix-authentication-service -- mas-cli manage lock "$username"; then
+        log_success "用户锁定成功"
+    else
+        log_error "用户锁定失败"
+    fi
+
+    echo ""
+    read -p "按任意键继续..." -n 1
+    user_management
+}
+
+# 解锁用户
+unlock_user() {
+    echo ""
+    echo -e "${BLUE}=== 解锁用户 ===${NC}"
+    echo ""
+
+    read -p "用户名: " username || username=""
+    if [[ -z "$username" ]]; then
+        log_error "用户名不能为空"
+        sleep 2
+        user_management
+        return
+    fi
+
+    log_info "解锁用户: $username"
+
+    if kubectl exec -n ess deployment/ess-matrix-authentication-service -- mas-cli manage unlock "$username"; then
+        log_success "用户解锁成功"
+    else
+        log_error "用户解锁失败"
+    fi
+
+    echo ""
+    read -p "按任意键继续..." -n 1
+    user_management
+}
+
+# 查看用户列表
+list_users() {
+    echo ""
+    echo -e "${BLUE}=== 用户列表 ===${NC}"
+    echo ""
+
+    log_info "获取用户列表..."
+
+    if kubectl exec -n ess deployment/ess-matrix-authentication-service -- mas-cli manage list-users; then
+        log_success "用户列表获取成功"
+    else
+        log_error "用户列表获取失败"
+    fi
+
+    echo ""
+    read -p "按任意键继续..." -n 1
+    user_management
+}
+
 # Element Call修复
 fix_element_call() {
     show_banner
@@ -1039,6 +1148,361 @@ show_system_status() {
     echo -e "${BLUE}=== 端口监听状态 ===${NC}"
     netstat -tlnp | grep -E ":(80|443|8080|8443|30881|30882)" || echo "未找到相关端口"
     echo ""
+
+    read -p "按任意键返回主菜单..." -n 1
+    show_main_menu
+}
+
+# 查看服务日志
+show_service_logs() {
+    show_banner
+
+    echo -e "${WHITE}服务日志查看${NC}"
+    echo ""
+    echo "1) Synapse日志"
+    echo "2) MAS认证服务日志"
+    echo "3) Matrix RTC日志"
+    echo "4) Element Web日志"
+    echo "5) HAProxy日志"
+    echo "0) 返回主菜单"
+    echo ""
+
+    read -p "请选择要查看的日志 [0-5]: " choice || choice=""
+
+    case $choice in
+        1)
+            echo ""
+            echo -e "${BLUE}=== Synapse日志 (最近50行) ===${NC}"
+            kubectl logs -n ess deployment/ess-synapse-main --tail=50
+            ;;
+        2)
+            echo ""
+            echo -e "${BLUE}=== MAS认证服务日志 (最近50行) ===${NC}"
+            kubectl logs -n ess deployment/ess-matrix-authentication-service --tail=50
+            ;;
+        3)
+            echo ""
+            echo -e "${BLUE}=== Matrix RTC日志 (最近50行) ===${NC}"
+            kubectl logs -n ess deployment/ess-matrix-rtc-sfu --tail=50
+            ;;
+        4)
+            echo ""
+            echo -e "${BLUE}=== Element Web日志 (最近50行) ===${NC}"
+            kubectl logs -n ess deployment/ess-element-web --tail=50
+            ;;
+        5)
+            echo ""
+            echo -e "${BLUE}=== HAProxy日志 (最近50行) ===${NC}"
+            kubectl logs -n ess deployment/ess-haproxy --tail=50
+            ;;
+        0) show_main_menu ;;
+        *)
+            log_error "无效选择"
+            sleep 2
+            show_service_logs
+            ;;
+    esac
+
+    echo ""
+    read -p "按任意键返回主菜单..." -n 1
+    show_main_menu
+}
+
+# 重启ESS服务
+restart_ess_services() {
+    show_banner
+
+    echo -e "${WHITE}重启ESS服务${NC}"
+    echo ""
+    echo "1) 重启所有服务"
+    echo "2) 重启Synapse"
+    echo "3) 重启MAS认证服务"
+    echo "4) 重启Matrix RTC"
+    echo "5) 重启Element Web"
+    echo "6) 重启HAProxy"
+    echo "0) 返回主菜单"
+    echo ""
+
+    read -p "请选择要重启的服务 [0-6]: " choice || choice=""
+
+    case $choice in
+        1)
+            log_info "重启所有ESS服务..."
+            kubectl rollout restart deployment -n ess
+            kubectl rollout status deployment -n ess --timeout=300s
+            log_success "所有服务重启完成"
+            ;;
+        2)
+            log_info "重启Synapse服务..."
+            kubectl rollout restart deployment ess-synapse-main -n ess
+            kubectl rollout status deployment ess-synapse-main -n ess --timeout=300s
+            log_success "Synapse服务重启完成"
+            ;;
+        3)
+            log_info "重启MAS认证服务..."
+            kubectl rollout restart deployment ess-matrix-authentication-service -n ess
+            kubectl rollout status deployment ess-matrix-authentication-service -n ess --timeout=300s
+            log_success "MAS认证服务重启完成"
+            ;;
+        4)
+            log_info "重启Matrix RTC服务..."
+            kubectl rollout restart deployment ess-matrix-rtc-sfu -n ess
+            kubectl rollout restart deployment ess-matrix-rtc-authorisation-service -n ess
+            kubectl rollout status deployment ess-matrix-rtc-sfu -n ess --timeout=300s
+            kubectl rollout status deployment ess-matrix-rtc-authorisation-service -n ess --timeout=300s
+            log_success "Matrix RTC服务重启完成"
+            ;;
+        5)
+            log_info "重启Element Web服务..."
+            kubectl rollout restart deployment ess-element-web -n ess
+            kubectl rollout status deployment ess-element-web -n ess --timeout=300s
+            log_success "Element Web服务重启完成"
+            ;;
+        6)
+            log_info "重启HAProxy服务..."
+            kubectl rollout restart deployment ess-haproxy -n ess
+            kubectl rollout status deployment ess-haproxy -n ess --timeout=300s
+            log_success "HAProxy服务重启完成"
+            ;;
+        0) show_main_menu ;;
+        *)
+            log_error "无效选择"
+            sleep 2
+            restart_ess_services
+            ;;
+    esac
+
+    echo ""
+    read -p "按任意键返回主菜单..." -n 1
+    show_main_menu
+}
+
+# 备份配置
+backup_configuration() {
+    show_banner
+
+    echo -e "${WHITE}配置备份${NC}"
+    echo ""
+
+    local backup_dir="/opt/ess-backup/$(date +%Y%m%d-%H%M%S)"
+    log_info "创建备份目录: $backup_dir"
+    $SUDO_CMD mkdir -p "$backup_dir"
+
+    # 备份Kubernetes配置
+    log_info "备份Kubernetes配置..."
+    kubectl get all -n ess -o yaml > "$backup_dir/ess-resources.yaml"
+    kubectl get configmaps -n ess -o yaml > "$backup_dir/ess-configmaps.yaml"
+    kubectl get secrets -n ess -o yaml > "$backup_dir/ess-secrets.yaml"
+    kubectl get ingress -n ess -o yaml > "$backup_dir/ess-ingress.yaml"
+
+    # 备份nginx配置
+    if [[ -f "/etc/nginx/sites-available/ess-proxy" ]]; then
+        log_info "备份nginx配置..."
+        $SUDO_CMD cp "/etc/nginx/sites-available/ess-proxy" "$backup_dir/nginx-ess-proxy.conf"
+    fi
+
+    # 备份SSL证书
+    if [[ -f "/etc/ssl/certs/ess.crt" ]]; then
+        log_info "备份SSL证书..."
+        $SUDO_CMD cp "/etc/ssl/certs/ess.crt" "$backup_dir/ess.crt"
+        $SUDO_CMD cp "/etc/ssl/private/ess.key" "$backup_dir/ess.key"
+    fi
+
+    # 创建备份信息文件
+    cat > "$backup_dir/backup-info.txt" <<EOF
+ESS配置备份
+备份时间: $(date)
+备份版本: 3.0.0
+备份内容:
+- Kubernetes资源配置
+- ConfigMaps配置
+- Secrets配置
+- Ingress配置
+- nginx配置文件
+- SSL证书文件
+EOF
+
+    log_success "配置备份完成"
+    echo "备份位置: $backup_dir"
+    echo ""
+
+    read -p "按任意键返回主菜单..." -n 1
+    show_main_menu
+}
+
+# 完整系统诊断
+full_system_diagnosis() {
+    show_banner
+
+    echo -e "${WHITE}完整系统诊断${NC}"
+    echo ""
+
+    log_info "开始完整系统诊断..."
+
+    # 系统基础检查
+    echo -e "${BLUE}=== 系统基础信息 ===${NC}"
+    echo "操作系统: $(cat /etc/os-release | grep PRETTY_NAME | cut -d'=' -f2 | tr -d '\"')"
+    echo "内核版本: $(uname -r)"
+    echo "内存使用: $(free -h | grep Mem | awk '{print $3"/"$2}')"
+    echo "磁盘使用: $(df -h / | tail -1 | awk '{print $3"/"$2" ("$5")"}')"
+    echo ""
+
+    # Kubernetes集群状态
+    echo -e "${BLUE}=== Kubernetes集群状态 ===${NC}"
+    kubectl get nodes
+    echo ""
+
+    # ESS服务状态
+    echo -e "${BLUE}=== ESS服务状态 ===${NC}"
+    kubectl get pods -n ess
+    echo ""
+
+    # 网络连接测试
+    echo -e "${BLUE}=== 网络连接测试 ===${NC}"
+    local domains=("google.com" "github.com" "ghcr.io")
+    for domain in "${domains[@]}"; do
+        if ping -c 1 "$domain" >/dev/null 2>&1; then
+            echo "✅ $domain - 可访问"
+        else
+            echo "❌ $domain - 不可访问"
+        fi
+    done
+    echo ""
+
+    # 端口监听状态
+    echo -e "${BLUE}=== 端口监听状态 ===${NC}"
+    netstat -tlnp | grep -E ":(80|443|8080|8443|30881|30882)" || echo "未找到相关端口"
+    echo ""
+
+    # 防火墙状态
+    echo -e "${BLUE}=== 防火墙状态 ===${NC}"
+    if command -v ufw >/dev/null 2>&1; then
+        ufw status
+    elif command -v firewall-cmd >/dev/null 2>&1; then
+        firewall-cmd --list-all
+    else
+        echo "未检测到支持的防火墙"
+    fi
+    echo ""
+
+    log_success "系统诊断完成"
+
+    read -p "按任意键返回主菜单..." -n 1
+    show_main_menu
+}
+
+# 网络连接测试
+network_connectivity_test() {
+    show_banner
+
+    echo -e "${WHITE}网络连接测试${NC}"
+    echo ""
+
+    log_info "开始网络连接测试..."
+
+    # 读取ESS配置
+    read_ess_config
+
+    # 测试域名解析
+    echo -e "${BLUE}=== 域名解析测试 ===${NC}"
+    local domains=("$ELEMENT_WEB_HOST" "$MAS_HOST" "$RTC_HOST" "$SYNAPSE_HOST" "$SERVER_NAME")
+    for domain in "${domains[@]}"; do
+        if nslookup "$domain" >/dev/null 2>&1; then
+            echo "✅ $domain - 解析成功"
+        else
+            echo "❌ $domain - 解析失败"
+        fi
+    done
+    echo ""
+
+    # 测试端口连接
+    echo -e "${BLUE}=== 端口连接测试 ===${NC}"
+    local ports=("80" "443" "8080" "8443" "30881" "30882")
+    for port in "${ports[@]}"; do
+        if netstat -tlnp | grep -q ":$port"; then
+            echo "✅ 端口 $port - 监听中"
+        else
+            echo "❌ 端口 $port - 未监听"
+        fi
+    done
+    echo ""
+
+    # 测试外部连接
+    echo -e "${BLUE}=== 外部连接测试 ===${NC}"
+    local external_hosts=("8.8.8.8" "1.1.1.1" "github.com" "google.com")
+    for host in "${external_hosts[@]}"; do
+        if ping -c 1 "$host" >/dev/null 2>&1; then
+            echo "✅ $host - 连接成功"
+        else
+            echo "❌ $host - 连接失败"
+        fi
+    done
+    echo ""
+
+    log_success "网络连接测试完成"
+
+    read -p "按任意键返回主菜单..." -n 1
+    show_main_menu
+}
+
+# Matrix RTC诊断
+matrix_rtc_diagnosis() {
+    show_banner
+
+    echo -e "${WHITE}Matrix RTC诊断${NC}"
+    echo ""
+
+    log_info "开始Matrix RTC诊断..."
+
+    # 读取ESS配置
+    read_ess_config
+
+    # 检查Matrix RTC服务
+    echo -e "${BLUE}=== Matrix RTC服务状态 ===${NC}"
+    kubectl get pods -n ess | grep matrix-rtc
+    echo ""
+
+    # 检查Matrix RTC服务配置
+    echo -e "${BLUE}=== Matrix RTC服务配置 ===${NC}"
+    kubectl get svc -n ess | grep matrix-rtc
+    echo ""
+
+    # 检查WebRTC端口
+    echo -e "${BLUE}=== WebRTC端口状态 ===${NC}"
+    local tcp_status=$(netstat -tlnp 2>/dev/null | grep ":30881" && echo "监听中" || echo "未监听")
+    local udp_status=$(netstat -ulnp 2>/dev/null | grep ":30882" && echo "监听中" || echo "未监听")
+    echo "TCP 30881: $tcp_status"
+    echo "UDP 30882: $udp_status"
+    echo ""
+
+    # 检查well-known配置
+    echo -e "${BLUE}=== well-known RTC配置 ===${NC}"
+    local well_known_content=$(curl -k -s "https://$SERVER_NAME:8443/.well-known/matrix/client" 2>/dev/null || echo "")
+    if echo "$well_known_content" | grep -q "org.matrix.msc4143.rtc_foci"; then
+        echo "✅ rtc_foci配置存在"
+        local livekit_url=$(echo "$well_known_content" | grep -o '"livekit_service_url":"[^"]*"' | cut -d'"' -f4)
+        echo "LiveKit URL: $livekit_url"
+    else
+        echo "❌ rtc_foci配置缺失"
+    fi
+    echo ""
+
+    # 诊断建议
+    echo -e "${BLUE}=== 诊断建议 ===${NC}"
+    if [[ "$tcp_status" == "监听中" && "$udp_status" == "监听中" ]]; then
+        echo "✅ WebRTC端口配置正常"
+    else
+        echo "❌ WebRTC端口配置异常，建议运行选项3修复Element Call问题"
+    fi
+
+    if echo "$well_known_content" | grep -q "org.matrix.msc4143.rtc_foci"; then
+        echo "✅ well-known RTC配置正常"
+    else
+        echo "❌ well-known RTC配置异常，建议运行选项1进行完整配置"
+    fi
+    echo ""
+
+    log_success "Matrix RTC诊断完成"
 
     read -p "按任意键返回主菜单..." -n 1
     show_main_menu
