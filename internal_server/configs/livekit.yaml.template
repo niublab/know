@@ -1,0 +1,70 @@
+# LiveKit配置文件模板 - Element ESS v2.1
+# 此文件将在部署时自动生成
+
+port: ${LIVEKIT_PORT}
+bind_addresses:
+  - 0.0.0.0
+
+# RTC配置
+rtc:
+  # TCP端口用于回退
+  tcp_port: 7881
+  # UDP端口范围
+  port_range_start: 50000
+  port_range_end: 60000
+  # 使用mDNS
+  use_ice_lite: true
+
+# API密钥配置
+keys:
+  ${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}
+
+# Redis配置 (如果启用)
+redis:
+  address: redis:6379
+
+# 日志配置
+logging:
+  level: info
+  json: false
+
+# Room配置
+room:
+  auto_create: true
+  enable_recording: false
+  
+# 开发配置
+development: false
+
+# TURN配置 (当启用LiveKit内置TURN时)
+turn:
+  enabled: ${ENABLE_LIVEKIT_TURN}
+  domain: ${LIVEKIT_SUBDOMAIN}
+  cert_file: /certs/live/${LIVEKIT_SUBDOMAIN}/fullchain.pem
+  key_file: /certs/live/${LIVEKIT_SUBDOMAIN}/privkey.pem
+  tls_port: ${TURN_TLS_PORT}
+  udp_port: ${TURN_PORT}
+  relay_range_start: 50000
+  relay_range_end: 60000
+
+# WebRTC配置
+webrtc:
+  ice_servers:
+    - urls: 
+        - "stun:${LIVEKIT_SUBDOMAIN}:${TURN_PORT}"
+      username: ""
+      credential: ""
+    - urls:
+        - "turn:${LIVEKIT_SUBDOMAIN}:${TURN_PORT}"
+        - "turns:${LIVEKIT_SUBDOMAIN}:${TURN_TLS_PORT}"
+      username: livekit
+      credential: ${LIVEKIT_API_SECRET}
+
+# 外部IP配置 (由WAN IP监控自动更新)
+rtc:
+  use_external_ip: true
+  external_ip: "AUTO_DETECTED"
+
+# 性能配置
+node_ip: ""
+region: ""

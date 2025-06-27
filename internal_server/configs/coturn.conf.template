@@ -1,0 +1,84 @@
+# Coturn配置文件模板 - Element ESS v2.1
+# 独立Coturn TURN服务器配置
+
+# 监听端口
+listening-port=${TURN_PORT}
+tls-listening-port=${TURN_TLS_PORT}
+
+# 最小和最大端口范围
+min-port=50000
+max-port=60000
+
+# 详细日志
+verbose
+
+# 使用指纹
+fingerprint
+
+# 长期凭证机制
+lt-cred-mech
+
+# 使用身份验证
+use-auth-secret
+
+# 静态身份验证密钥
+static-auth-secret=${COTURN_PASSWORD}
+
+# 域名设置
+realm=${COTURN_REALM}
+
+# 证书文件
+cert=/etc/letsencrypt/live/${MATRIX_SUBDOMAIN}/fullchain.pem
+pkey=/etc/letsencrypt/live/${MATRIX_SUBDOMAIN}/privkey.pem
+
+# 外部IP (由WAN IP监控自动更新)
+external-ip=AUTO_DETECTED
+
+# 拒绝来自私有IP的中继
+no-multicast-peers
+denied-peer-ip=0.0.0.0-0.255.255.255
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=100.64.0.0-100.127.255.255
+denied-peer-ip=127.0.0.0-127.255.255.255
+denied-peer-ip=169.254.0.0-169.254.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.0.0.0-192.0.0.255
+denied-peer-ip=192.0.2.0-192.0.2.255
+denied-peer-ip=192.88.99.0-192.88.99.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+denied-peer-ip=198.18.0.0-198.19.255.255
+denied-peer-ip=198.51.100.0-198.51.100.255
+denied-peer-ip=203.0.113.0-203.0.113.255
+denied-peer-ip=240.0.0.0-255.255.255.255
+
+# 用户配配额 (可选)
+# user-quota=12
+# total-quota=1200
+
+# 进程用户
+proc-user=turnserver
+proc-group=turnserver
+
+# 日志文件
+log-file=/var/log/coturn/coturn.log
+
+# 简单日志文件名
+simple-log
+
+# 不使用标准输出
+no-stdout-log
+
+# PID文件
+pidfile=/var/run/coturn/coturn.pid
+
+# 禁用不安全的功能
+no-tlsv1
+no-tlsv1_1
+
+# 启用更安全的功能
+no-udp-relay
+no-tcp-relay
+
+# CLI配置
+cli-ip=127.0.0.1
+cli-port=5766

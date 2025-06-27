@@ -1,0 +1,220 @@
+# Synapse Homeserver配置模板 - Element ESS v2.1
+# 此文件将在部署时自动生成
+
+# 服务器配置
+server_name: "${SYNAPSE_SERVER_NAME}"
+pid_file: /data/homeserver.pid
+public_baseurl: "https://${MATRIX_SUBDOMAIN}/"
+
+# 监听端口
+listeners:
+  - port: ${SYNAPSE_HTTP_PORT}
+    tls: false
+    type: http
+    x_forwarded: true
+    bind_addresses: ['0.0.0.0']
+    resources:
+      - names: [client, federation]
+        compress: false
+
+# 数据库配置
+database:
+  name: psycopg2
+  args:
+    user: ${POSTGRES_USER}
+    password: ${POSTGRES_PASSWORD}
+    database: ${POSTGRES_DB}
+    host: ${POSTGRES_HOST}
+    port: ${POSTGRES_PORT}
+    cp_min: ${POSTGRES_CP_MIN}
+    cp_max: ${POSTGRES_CP_MAX}
+
+# 日志配置
+log_config: "/config/log.config"
+
+# 媒体存储
+media_store_path: /data/media_store
+uploads_path: /data/uploads
+
+# 最大上传大小
+max_upload_size: 50M
+
+# 用户注册
+enable_registration: ${SYNAPSE_ENABLE_REGISTRATION}
+registration_shared_secret: "${REGISTRATION_SHARED_SECRET}"
+
+# 报告统计
+report_stats: ${SYNAPSE_REPORT_STATS}
+
+# 表单密钥
+form_secret: "${FORM_SECRET}"
+
+# 签名密钥
+signing_key_path: "/data/${SYNAPSE_SERVER_NAME}.signing.key"
+
+# 信任的密钥服务器
+trusted_key_servers:
+  - server_name: "matrix.org"
+
+# 速率限制
+rc_message:
+  per_second: 0.2
+  burst_count: 10
+
+rc_registration:
+  per_second: 0.17
+  burst_count: 3
+
+rc_login:
+  address:
+    per_second: 0.17
+    burst_count: 3
+  account:
+    per_second: 0.17
+    burst_count: 3
+  failed_attempts:
+    per_second: 0.17
+    burst_count: 3
+
+# 联邦配置
+federation_domain_whitelist: []
+federation_ip_range_blacklist:
+  - '127.0.0.0/8'
+  - '10.0.0.0/8'
+  - '172.16.0.0/12'
+  - '192.168.0.0/16'
+  - '100.64.0.0/10'
+  - '169.254.0.0/16'
+  - '::1/128'
+  - 'fe80::/64'
+  - 'fc00::/7'
+
+# 内容过滤
+content_filter:
+  enabled: true
+
+# URL预览
+url_preview_enabled: true
+url_preview_ip_range_blacklist:
+  - '127.0.0.0/8'
+  - '10.0.0.0/8'
+  - '172.16.0.0/12'
+  - '192.168.0.0/16'
+  - '100.64.0.0/10'
+  - '169.254.0.0/16'
+  - '::1/128'
+  - 'fe80::/64'
+  - 'fc00::/7'
+
+url_preview_url_blacklist:
+  - username: '*'
+  - netloc: 'google.com'
+  - netloc: '*.google.com'
+
+# 房间设置
+encryption_enabled_by_default_for_room_type: "invite"
+default_room_version: "9"
+
+# 客户端配置
+presence:
+  enabled: true
+
+# 推送配置
+push:
+  include_content: true
+
+# TURN配置 (根据选择的TURN服务类型动态生成)
+# 如果使用LiveKit内置TURN
+turn_uris:
+  - "turn:${LIVEKIT_SUBDOMAIN}:${TURN_PORT}?transport=udp"
+  - "turn:${LIVEKIT_SUBDOMAIN}:${TURN_PORT}?transport=tcp"
+  - "turns:${LIVEKIT_SUBDOMAIN}:${TURN_TLS_PORT}?transport=tcp"
+
+turn_shared_secret: "${LIVEKIT_API_SECRET}"
+turn_user_lifetime: 1h
+turn_allow_guests: true
+
+# 如果使用独立Coturn (在部署时根据TURN_SERVICE_TYPE替换)
+# turn_uris:
+#   - "turn:${MATRIX_SUBDOMAIN}:${TURN_PORT}?transport=udp"
+#   - "turn:${MATRIX_SUBDOMAIN}:${TURN_PORT}?transport=tcp"
+#   - "turns:${MATRIX_SUBDOMAIN}:${TURN_TLS_PORT}?transport=tcp"
+# turn_shared_secret: "${COTURN_PASSWORD}"
+
+# 事件缓存大小
+event_cache_size: 10K
+
+# 用户目录
+user_directory:
+  enabled: true
+  search_all_users: false
+  prefer_local_users: true
+
+# 管理联系人
+admin_contact: 'mailto:admin@${MAIN_DOMAIN}'
+
+# 隐私政策
+user_consent:
+  version: "1.0"
+  server_notice_content:
+    msgtype: m.text
+    body: >-
+      To continue using this homeserver you must review and agree to the
+      terms and conditions at %(consent_uri)s
+  send_server_notice_to_guests: true
+  consent_uri: "https://${ELEMENT_SUBDOMAIN}/consent"
+  require_at_registration: false
+  policy_name: "Privacy Policy"
+
+# 统计和指标
+enable_metrics: false
+metrics_port: 9000
+
+# 缓存配置
+caches:
+  global_factor: 1.0
+  expire_caches: true
+  cache_entry_ttl: 30m
+
+# WebRTC配置 (Matrix-RTC)
+experimental_features:
+  msc2716_enabled: true
+  msc3026_enabled: true
+  msc3202_enabled: true
+  msc3720_enabled: true
+  msc3773_enabled: true
+  msc3827_enabled: true
+  msc3874_enabled: true
+  msc3886_enabled: true
+
+# Element Call集成
+element_call:
+  url: "https://${LIVEKIT_SUBDOMAIN}"
+  api_key: "${LIVEKIT_API_KEY}"
+  api_secret: "${LIVEKIT_API_SECRET}"
+
+# 抑制关键错误
+suppress_key_server_warning: true
+
+# App服务配置
+app_service_config_files: []
+
+# 第三方身份服务器 (已禁用外部服务)
+# default_identity_server: ""
+
+# 邮件配置 (可选)
+email:
+  smtp_host: ""
+  smtp_port: 587
+  smtp_user: ""
+  smtp_pass: ""
+  force_tls: true
+  notif_from: "Your Matrix Homeserver <noreply@${MAIN_DOMAIN}>"
+  app_name: "Matrix"
+  
+# 房间邀请设置
+block_non_admin_invites: false
+
+# 密码配置
+password_config:
+  enabled: true

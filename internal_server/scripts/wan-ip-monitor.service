@@ -1,0 +1,38 @@
+[Unit]
+Description=WAN IP Monitor Service for Element ESS
+Documentation=https://github.com/element-hq/ess-helm
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/bin/python3 /usr/local/bin/wan_ip_monitor.py /etc/wan-ip-monitor.conf
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# 环境变量
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+
+# 安全设置
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/log /opt/element-ess /etc/letsencrypt
+
+# 资源限制
+LimitNOFILE=65536
+MemoryMax=256M
+CPUQuota=50%
+
+# 日志设置
+SyslogIdentifier=wan-ip-monitor
+
+[Install]
+WantedBy=multi-user.target

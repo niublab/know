@@ -1,0 +1,394 @@
+# Element ESS Docker Compose配置 v2.0
+# 内部服务器完整部署配置
+
+services:
+  # PostgreSQL数据库
+  postgres:
+    image: postgres:15-alpine
+    container_name: element-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - /opt/element-ess/data/postgres:/var/lib/postgresql/data
+    networks:
+      - element-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: ${POSTGRES_MEMORY_LIMIT:-256M}
+        reservations:
+          memory: 128M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Redis缓存 (可选，用于性能优化)
+  redis:
+    image: redis:7-alpine
+    container_name: element-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 128mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    networks:
+      - element-network
+    profiles: ["with-redis"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  # Synapse Matrix服务器
+  synapse:
+    image: matrixdotorg/synapse:latest
+    container_name: element-synapse
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SYNAPSE_SERVER_NAME: ${MATRIX_SERVER_NAME}
+      SYNAPSE_REPORT_STATS: "no"
+      SYNAPSE_CONFIG_DIR: /config
+      SYNAPSE_CONFIG_PATH: /config/homeserver.yaml
+      SYNAPSE_DATA_DIR: /data
+    volumes:
+      - synapse_data:/data
+      - /opt/element-ess/data/synapse:/data
+      - /opt/element-ess/config/synapse:/config:ro
+      - /opt/element-ess/logs/synapse:/logs
+    networks:
+      - element-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8008/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: ${SYNAPSE_MEMORY_LIMIT:-1G}
+        reservations:
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # LiveKit SFU服务器 (可选内置TURN)
+  livekit:
+    image: livekit/livekit-server:v1.9.0
+    container_name: element-livekit
+    restart: unless-stopped
+    command: --config /config/livekit.yaml --bind 0.0.0.0
+    volumes:
+      - /opt/element-ess/config/livekit:/config:ro
+      - /etc/letsencrypt:/certs:ro
+      - livekit_data:/data
+    ports:
+      # LiveKit HTTP/WebSocket端口
+      - "${LIVEKIT_PORT:-7880}:${LIVEKIT_PORT:-7880}"
+      # LiveKit TCP RTC端口
+      - "7881:7881"
+      # RTC UDP端口范围
+      - "50000-60000:50000-60000/udp"
+    # 条件端口映射 - TURN端口仅在启用内置TURN时暴露
+    networks:
+      - element-network
+    environment:
+      - LIVEKIT_CONFIG=/config/livekit.yaml
+      - LIVEKIT_KEYS=${LIVEKIT_API_KEY}:${LIVEKIT_API_SECRET}
+      - TURN_SERVICE_TYPE=${TURN_SERVICE_TYPE:-livekit}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:${LIVEKIT_PORT:-7880}/rtc || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: ${LIVEKIT_MEMORY_LIMIT:-512M}
+        reservations:
+          memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
+    profiles:
+      - default
+      - livekit-turn
+
+  # Coturn TURN服务器 (可选，当不使用LiveKit内置TURN时)
+  coturn:
+    image: coturn/coturn:latest
+    container_name: element-coturn
+    restart: unless-stopped
+    profiles: ["standalone-turn"]
+    command: |
+      sh -c "
+        turnserver \
+        --listening-port=${TURN_PORT:-3478} \
+        --tls-listening-port=${TURN_TLS_PORT:-5349} \
+        --alt-listening-port=3479 \
+        --alt-tls-listening-port=5350 \
+        --min-port=50000 \
+        --max-port=60000 \
+        --realm=${LIVEKIT_SUBDOMAIN} \
+        --server-name=${LIVEKIT_SUBDOMAIN} \
+        --lt-cred-mech \
+        --use-auth-secret \
+        --static-auth-secret=${LIVEKIT_API_SECRET} \
+        --no-stdout-log \
+        --log-file=/var/log/turnserver.log \
+        --cert=/certs/live/${MATRIX_SUBDOMAIN}/fullchain.pem \
+        --pkey=/certs/live/${MATRIX_SUBDOMAIN}/privkey.pem \
+        --no-tlsv1 \
+        --no-tlsv1_1 \
+        --cipher-list='ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384' \
+        --dh-file=/etc/coturn/dhparam.pem \
+        --external-ip=${LIVEKIT_NODE_IP}
+      "
+    volumes:
+      - /etc/letsencrypt:/certs:ro
+      - coturn_data:/var/lib/coturn
+    ports:
+      - "${TURN_PORT:-3478}:${TURN_PORT:-3478}/udp"
+      - "${TURN_PORT:-3478}:${TURN_PORT:-3478}/tcp"
+      - "${TURN_TLS_PORT:-5349}:${TURN_TLS_PORT:-5349}/tcp"
+      - "3479:3479/udp"
+      - "5350:5350/tcp"
+      - "50000-60000:50000-60000/udp"
+    networks:
+      - element-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  # Element Web客户端
+  element-web:
+    image: vectorim/element-web:latest
+    container_name: element-web
+    restart: unless-stopped
+    volumes:
+      - /opt/element-ess/config/element-web/config.json:/app/config.json:ro
+    networks:
+      - element-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+        reservations:
+          memory: 32M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  # Matrix身份认证服务 (可选)
+  matrix-authentication-service:
+    image: ghcr.io/matrix-org/matrix-authentication-service:latest
+    container_name: element-mas
+    restart: unless-stopped
+    profiles: ["with-mas"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - MAS_CONFIG=/config/mas-config.yaml
+    volumes:
+      - /opt/element-ess/config/mas:/config:ro
+      - mas_data:/data
+    networks:
+      - element-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8090/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  # Nginx反向代理
+  nginx:
+    image: nginx:alpine
+    container_name: element-nginx
+    restart: unless-stopped
+    depends_on:
+      - synapse
+      - livekit
+      - element-web
+    ports:
+      - "${NGINX_HTTP_PORT:-80}:80"
+      - "${NGINX_HTTPS_PORT:-443}:443"
+    volumes:
+      - /opt/element-ess/config/nginx:/etc/nginx/conf.d:ro
+      - /etc/letsencrypt:/certs:ro
+      - /opt/element-ess/logs/nginx:/var/log/nginx
+      - nginx_cache:/var/cache/nginx
+    networks:
+      - element-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # 监控服务 (可选)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: element-prometheus
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+      - '--storage.tsdb.retention.time=7d'
+    ports:
+      - "${MONITORING_PORT:-9090}:9090"
+    volumes:
+      - /opt/element-ess/config/prometheus:/etc/prometheus:ro
+      - prometheus_data:/prometheus
+    networks:
+      - element-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  # Grafana仪表板 (可选)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: element-grafana
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_INSTALL_PLUGINS=prometheus
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - /opt/element-ess/config/grafana:/etc/grafana/provisioning:ro
+    networks:
+      - element-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  # Element ESS Admin管理工具 (可选)
+  element-admin:
+    image: python:3.11-alpine
+    container_name: element-admin-web
+    restart: unless-stopped
+    profiles: ["admin-web"]
+    working_dir: /app
+    command: >
+      sh -c "
+        pip install flask pyjwt requests pyyaml werkzeug &&
+        python element_admin.py --host 0.0.0.0 --port ${ADMIN_TOOL_PORT:-8888}
+      "
+    ports:
+      - "${ADMIN_TOOL_PORT:-8888}:${ADMIN_TOOL_PORT:-8888}"
+    volumes:
+      - /opt/element-ess/scripts/element_admin.py:/app/element_admin.py:ro
+      - /opt/element-ess/data/admin:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - ADMIN_JWT_SECRET=${ADMIN_JWT_SECRET}
+      - ADMIN_DB_PATH=/app/data/admin.db
+      - DOCKER_COMPOSE_PATH=/opt/element-ess/docker-compose.yml
+    networks:
+      - element-network
+    depends_on:
+      - synapse
+      - postgres
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  synapse_data:
+    driver: local
+  livekit_data:
+    driver: local
+  coturn_data:
+    driver: local
+  mas_data:
+    driver: local
+  nginx_cache:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+networks:
+  element-network:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/16
+          gateway: 172.20.0.1
+    driver_opts:
+      com.docker.network.bridge.name: "element-br0"
+      com.docker.network.driver.mtu: "1500"
