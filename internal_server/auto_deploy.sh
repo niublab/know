@@ -8,7 +8,7 @@ set -euo pipefail
 # 脚本配置
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PACKAGE_ROOT="$(dirname "$SCRIPT_DIR")"
-LOG_FILE="~/element-ess-deploy.log"
+LOG_FILE="/var/log/element-ess-deploy.log"
 DOCKER_COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
 
 # 颜色输出
